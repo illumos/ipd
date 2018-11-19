@@ -9,6 +9,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 
 | state    | IPD |
 | -------- | ------------------------------------------------------------- |
+| predraft | [IPD 1 Virtual Environment for Jenkins Build and Test](./ipd/0001/README.md) |
 
 ## Contributing
 

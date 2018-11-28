@@ -7,7 +7,7 @@ state: predraft
 
 ## Introduction
 
-As part of Illumos's historical inheritance, we until very recently, ran lint
+As part of Illumos's historical inheritance we, until very recently, ran lint
 against a significant portion of the source code (as mostly defined by
 [Makefile.lint](https://github.com/illumos/illumos-gate/blob/master/usr/src/Makefile.lint)).
 
@@ -28,13 +28,13 @@ behaviour is not supported by any warning option. GCC can only check return
 values for functions explicitly marked, and does not respect cast-to-void, which
 we use to silence lint right now.
 
-However, there is an alternative: [smatch](https://repo.or.cz/w/smatch.git).
+There is an alternative: [smatch](https://repo.or.cz/w/smatch.git).
 This is a [sparse](https://sparse.wiki.kernel.org/index.php/Main_Page)-based
 static checker, mainly aimed at the Linux kernel. While it has a large number of
 Linux-specific checks, it's also usable as a general static checker. What is
 particularly interesting about smatch is that it is written in C, and is easily
 hackable. This should be considered a great advantage over many other checkers,
-which are either closed sources, written in a language understood by few, or
+which are either closed source, written in a language understood by few, or
 both.
 
 A proof of concept has demonstrated that smatch can be used to replace at least
@@ -45,7 +45,7 @@ or `printf()` etc.
 
 The approachability of smatch is also appealing for other reasons, as it would
 also to add source-specific checks relatively easily. For example, unchecked
-`kmem_alloc(..., KM\_NOSLEEP)`, unchecked user-supplied integers, Spectre gadget
+`kmem_alloc(..., KM_NOSLEEP)`, unchecked user-supplied integers, Spectre gadget
 discovery, etc.
 
 ## Implementation
@@ -87,7 +87,7 @@ in a sub-directory:
 CERRWARN += $(DISABLE_SMATCH)
 ```
 
-which becomes `-\_smatch=off`. *cw* will spot this and not run smatch against
+which becomes `-_smatch=off`. *cw* will spot this and not run smatch against
 those source files. `usr/src/Makefile.smatch` also defines a few default flags,
 where the checks are triggered by too many false positives, or too much legacy
 code.
@@ -110,7 +110,7 @@ A related question is how to integrate smatch itself into the build environment.
 
 smatch itself ships with data files that are closely tied to the source base
 under inspection. The current version defines two different projects,
-`illumos\_kernel` for `usr/src/uts` and `illumos\_user` for the rest of Illumos,
+`illumos_kernel` for `usr/src/uts` and `illumos_user` for the rest of Illumos,
 and specific function names are listed there for various reasons. We also
 anticipate some source-specific checks being added as described above.
 
@@ -137,7 +137,7 @@ are unknown.
 smatch integration/compatibility with clang/LLVM is unknown.
 
 smatch cannot parse everything in our gate, and has known deficiencies (for
-example, `\_\_NORETURN` is not properly respected).
+example, `__NORETURN` is not properly respected).
 
 Several locations cause smatch to time out (after 60 seconds typically). We
 should investigate why, and potentially fix smatch.

@@ -142,6 +142,12 @@ example, `__NORETURN` is not properly respected).
 Several locations cause smatch to time out (after 60 seconds typically). We
 should investigate why, and potentially fix smatch.
 
+sparse's handling of the default macro definitions is extremely basic: essentially,
+we define just enough of the expected compiler and hardware environment to enable us
+to compile the sources by hand. Even the `cgcc` wrapper provided with sparse hard-codes
+a bunch of these macros. The risk here is that we miss significant checks by not defining
+the right set of macros we expect.
+
 If the upstream project dies for whatever reason, we will have the burden of
 maintaining smatch, and potentially sparse, ourselves. However, if needed, the
 size and scope of these projects mean this is fairly doable.

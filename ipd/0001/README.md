@@ -24,5 +24,6 @@ process, some of which represent operating system bugs -- or at least areas
 where we could make enhancements.  A non-exhaustive list appears below:
 
 * [Bug 9985](https://www.illumos.org/issues/9985) blkdev devices can have an invalid devid
+* [Bug 10012](https://www.illumos.org/issues/10012) vioblk should not accept an all-zero serial number
 * [Bug 7119](https://www.illumos.org/issues/7119) boot should be more resilient to physical path to bootfs changing
 * [Bug 1857](https://www.illumos.org/issues/1857) "No SOF interrupts have been received..USB UHCI is unusable" under KVM

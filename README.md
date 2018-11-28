@@ -10,6 +10,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | state    | IPD |
 | -------- | ------------------------------------------------------------- |
 | predraft | [IPD 1 Virtual Environment for Jenkins Build and Test](./ipd/0001/README.md) |
+| predraft | [IPD 2 Running smatch for Illumos builds](./ipd/0002/README.md) |
 
 ## Contributing
 

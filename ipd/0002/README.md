@@ -129,6 +129,17 @@ make sense to upstream the Illumos data files themselves, as they are tied to
 the source revision, not smatch itself. There is also at least one change
 rejected by upstream that we rely on.
 
+## Updating smatch
+
+If we need to resync with upstream smatch, the procedure is as follows:
+
+1. Pull upstream into the `master` branch of `https://github.com/illumos/smatch`
+1. Merge into the `illumos` branch.
+1. Tag as e.g. `0.9.1-il-1`
+1. Copy sources over to `illumos-gate` `usr/src/tools/smatch/src`
+1. Update `usr/src/tools/smatch/Makefile` with the new tag information
+1. RTI
+
 ## Caveats and Risks
 
 smatch does not cover C++ code or SPARC code, unlike lint. Other architectures

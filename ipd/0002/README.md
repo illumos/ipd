@@ -1,6 +1,6 @@
 ---
 authors: John Levon <john.levon@joyent.com>
-state: predraft
+state: published
 ---
 
 # IPD 2 Running smatch for Illumos builds
@@ -37,9 +37,9 @@ hackable. This should be considered a great advantage over many other checkers,
 which are either closed source, written in a language understood by few, or
 both.
 
-A proof of concept has demonstrated that smatch can be used to replace at least
+We will use smatch to replace at least
 the checked-return functionality of lint across the Illumos source base. In
-fact, the POC is already far superior to that of lint: the parser catches calls
+fact, smatch is already far superior to that of lint: the parser catches calls
 through function pointers that lint does not, does not complain about `memset()`
 or `printf()` etc.
 
@@ -47,6 +47,9 @@ The approachability of smatch is also appealing for other reasons, as it would
 also to add source-specific checks relatively easily. For example, unchecked
 `kmem_alloc(..., KM_NOSLEEP)`, unchecked user-supplied integers, Spectre gadget
 discovery, etc.
+
+In addition, a range of existing smatch checks are already catching real, new, bugs in the
+Illumos code base.
 
 ## Implementation
 
@@ -84,7 +87,7 @@ is to modify the Makefiles as needed. For example, to completely disable smatch
 in a sub-directory:
 
 ```
-CERRWARN += $(DISABLE_SMATCH)
+SMATCH=off
 ```
 
 which becomes `-_smatch=off`. *cw* will spot this and not run smatch against
@@ -95,8 +98,8 @@ code.
 Specific checks can also be disabled (or enabled) like this:
 
 ```
-CERRWARN += -_smatch=--disable=uninitialized,check_check_deref,unreachable
-CERRWARN += -_smatch=-Wno-vla
+SMOFF += uninitialized,check_check_deref,unreachable
+SMOFF += -_smatch=-Wno-vla
 ```
 
 (The latter is an example of sparse-level check.)
@@ -115,15 +118,13 @@ and specific function names are listed there for various reasons. We also
 anticipate some source-specific checks being added as described above.
 
 For these reasons, it seems preferable to ship a version of smatch source under
-`usr/src/tools`, and build and run it directly from there. Exactly how that
-deliver should work is not yet clear. The most obvious way would be a git
-submodule, but it also seems reasonable to just directly import by hand as
-needed (an identical copy of `github.com/illumos/smatch/tree/illumos`).
+`usr/src/tools`, and build and run it directly from there. This is a local copy
+of `github.com/illumos/smatch/tree/illumos`.
 
 ## Upstreaming changes
 
 As mentioned above, there have already been several changes as part of the proof
-of concept, and upstreaming is progressing well. There will inevitably be some
+of concept, and upstreaming has gone well. There will inevitably be some
 changes not relevant for upstreaming though. In particular, it doesn't seem to
 make sense to upstream the Illumos data files themselves, as they are tied to
 the source revision, not smatch itself. There is also at least one change
@@ -163,7 +164,7 @@ If the upstream project dies for whatever reason, we will have the burden of
 maintaining smatch, and potentially sparse, ourselves. However, if needed, the
 size and scope of these projects mean this is fairly doable.
 
-A larger risk is the upstream sparse project taking a radical direction that
+A larger risk is the upstream sparse project taking a radical new direction that
 does not suit our needs.
 
 ## Policy changes
@@ -178,4 +179,4 @@ As mentioned, there are a lot of additional checks that could be added.
 smatch can also be used in a looser analysis sense, for investigating properties
 of the source. For example, it's possible to use smatch for tainting data.
 
-We could gradually enable more smatch across the source base.
+We could and should gradually enable more smatch across the source base.

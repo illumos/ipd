@@ -12,6 +12,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 1 Virtual Environment for Jenkins Build and Test](./ipd/0001/README.md) |
 | published | [IPD 2 Running smatch for illumos builds](./ipd/0002/README.md) |
 | reserved  | [IPD 3 Link management improvements](./ipd/0003/README.md) |
+| predraft  | [IPD 4 Manual Page Section Renumbering](./ipd/0004/README.md) |
 
 ## Contributing
 

@@ -13,6 +13,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 2 Running smatch for illumos builds](./ipd/0002/README.md) |
 | predraft  | [IPD 3 Link management improvements](./ipd/0003/README.md) |
 | predraft  | [IPD 4 Manual Page Section Renumbering](./ipd/0004/README.md) |
+| draft  | [IPD 5 Rationalize SPARC platform support](./ipd/0005/README.md) |
 
 ## Contributing
 

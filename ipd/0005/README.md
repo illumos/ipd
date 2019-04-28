@@ -98,3 +98,17 @@ domain and DR operations.
 The Ultra-2, which would be the last remaining sbus system. The issue here
 is that the Ultra-2 is the base platform from which many of the smaller
 desktop systems are inherited.
+
+## Implementation
+
+The proposed plan for implementation is to work through the platforms,
+removing one at a time (similar to starfire removal). Breaking the work
+up like this makes each step more manageable, and also allows easier triage
+if anything does get broken.
+
+It's likely that there will need to be final cleanup of unused modules, as
+there are some modules that are shared between platforms.
+
+It is planned to defer other work, such as gcc7, NULL, and smatch, until
+this project has completed, to avoid having to clean up code that is then
+removed.

@@ -1,5 +1,6 @@
 ---
 authors: Peter Tribble <peter.tribble@gmail.com>
+sponsor: Joshua M. Clulow <josh@sysmgr.org>
 state: draft
 ---
 

@@ -1,7 +1,7 @@
 ---
 authors: Peter Tribble <peter.tribble@gmail.com>
 sponsor: Joshua M. Clulow <josh@sysmgr.org>
-state: draft
+state: published
 ---
 
 # IPD 5 Rationalize SPARC platform support
@@ -69,7 +69,8 @@ platform, there are no known users, it's 2 decades old, and ties us to sbus,
 sf, and socal.
 
 The starcat range - The F15K and variants. Like the starfire, these were big
-expensive systems requiring dedicated controller hardware.
+expensive systems requiring dedicated controller hardware. See issue
+[10864](https://www.illumos.org/issues/10864).
 
 The serengeti range, which are the newer Sun-Fire E2900-E6800 systems. Although
 more modern, there are no known users, and there's a big blob of complex

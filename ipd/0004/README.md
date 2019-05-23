@@ -1,6 +1,6 @@
 ---
 authors: Joshua M. Clulow <josh@sysmgr.org>
-state: predraft
+state: draft
 ---
 
 # IPD 4 Manual Page Section Renumbering
@@ -110,6 +110,21 @@ library routines) in 3C.  The `man` command could, upon not finding a relevant
 page in the top-level section, attempt a search of any relevant subsections.
 This would use the same search order as if the user had provided no `-s` option
 to `man`, except constrained to subsections of the nominated top-level section.
+
+### Transition For Unbundled Software
+
+Most distributions of illumos ship some quantity of software from
+consolidations other than `illumos-gate`.  An inexhaustive survey suggests that
+a variety of choices have been made about whether to, or how to, transform
+third party pages; e.g., to take a section 8 page and ship it in section 1M.
+Where transformation has occurred through patches or otherwise, it hasn't been
+strictly uniform or even necessarily correct.
+
+There isn't a strategy that can completely avoid a flag day for sections 4, 5,
+and 7, as they overlap before and after the transition.  As there is presently
+no section 8 and there will be no section 1M in the future, we can keep 1M in
+the appropriate position in the search order so that at least administrative
+command pages will still be found by `man` prior to being moved.
 
 ## Other Operating Systems
 

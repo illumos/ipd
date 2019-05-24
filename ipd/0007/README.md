@@ -64,10 +64,10 @@ People wishing to work on newer versions of gcc may have the appropriate
 branch created in `illumos/gcc` early in the development cycle to facilitate
 cooperation with anyone else who may be planning a similar update.
 
-Changes wishing to be uptreamed should be submitted in the form of pull
-requests were that is possible, or github issues requesting a branch be
-created onto which pull requests may be submitted, or a branch be pulled up
-into `illumos/gcc` to establish a new version branch.
+Changes wishing to be integrated to illumos/gcc should be submitted in the
+form of pull requests where that is possible, or github issues requesting a
+branch be created onto which pull requests may be submitted, or a branch be
+pulled up into `illumos/gcc` to establish a new version branch.
 
 ### Endorsing a new version of GCC for use with `illumos-gate`
 
@@ -90,10 +90,10 @@ that GCC has not produced cloned special purpose versions of symbols (these
 tend to be named in the form `foo.xy.N` where _foo_ is the original symbol,
 _xy_ is an optimizer pass, and _N_ a sequence number).
 
-### Submitting Patches Upstream
+### Submitting Patches to GCC
 
-It would be good to begin the process of submitting patches upstream, though
-historically we have not for various reasons.  Some of our patches are
+It would be good to begin the process of submitting patches upstream to GCC,
+though historically we have not for various reasons.  Some of our patches are
 particularly opinionated and unsuitable for general use, and will likely be
 our own forever.  Patches not in this category should at least be considered
 for submitting upstream.

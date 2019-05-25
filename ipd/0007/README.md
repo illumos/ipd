@@ -42,7 +42,7 @@ building `illumos-gate`, but also works in progress towards upgrading those
 compilers (such as were previously kept in personal repositories), on branch
 names matching the pattern used thus far (that is `il-X_Y_Z`).  Using other
 branch names, and personal repositories has thus far not hindered people
-taking these compilers and using them in production, and as only served to
+taking these compilers and using them in production, and has only served to
 hinder cooperation on their maintenance.  As such, it is abandoned.
 
 Versions of the compiler endorsed for use with `illumos-gate`, and only those
@@ -74,9 +74,9 @@ pulled up into `illumos/gcc` to establish a new version branch.
 New versions of GCC for `illumos-gate` need to be discussed with the
 advocates.
 
-Test results from the GCC suite should show know regressions from a mainline
+Test results from the GCC suite should show no regressions from a mainline
 GCC of equivalent version, and any regressions relative to the last endorsed
-GCC bust be carefully evaluated (hopefully, there would be none).
+GCC must be carefully evaluated (hopefully, there would be none).
 
 Test results from the illumos tests should be favourably comparable to a
 baseline with the current compiler, manual testing of debug facilities

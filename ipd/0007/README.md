@@ -88,7 +88,9 @@ be taken to verify that the compiler has not regressed.  No fbt or pid probe
 previously visible to DTrace should now be invisible.  Care should be taken
 that GCC has not produced cloned special purpose versions of symbols (these
 tend to be named in the form `foo.xy.N` where _foo_ is the original symbol,
-_xy_ is an optimizer pass, and _N_ a sequence number).
+_xy_ is an optimizer pass, and _N_ a sequence number).  CTF type information
+should be checked compared to the old compiler (diffs of `ctfdump -c` are
+helpful here).
 
 ### Submitting Patches to GCC
 

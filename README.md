@@ -15,7 +15,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | draft     | [IPD 4 Manual Page Section Renumbering](./ipd/0004/README.md) |
 | published | [IPD 5 Rationalize SPARC platform support](./ipd/0005/README.md) |
 | predraft  | [IPD 6 allocb(): The `pri` argument, and use of KM_NORMALPRI](./ipd/0006/README.md) |
-| draft     | [IPD 7 illumos GCC maintenance](./ipd/0007/README.md) |
+| published | [IPD 7 illumos GCC maintenance](./ipd/0007/README.md) |
 
 ## Contributing
 

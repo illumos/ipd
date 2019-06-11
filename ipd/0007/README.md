@@ -1,6 +1,6 @@
 ---
 author: Richard Lowe
-state: draft
+state: published
 ---
 
 # IPD 7 illumos GCC maintenance

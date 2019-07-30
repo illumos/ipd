@@ -17,6 +17,8 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 6 allocb(): The `pri` argument, and use of KM_NORMALPRI](./ipd/0006/README.md) |
 | published | [IPD 7 illumos GCC maintenance](./ipd/0007/README.md) |
 | draft     | [IPD 8 EOF NCA/NL7C](./ipd/0008/README.md) |
+| draft     | [IPD 9 PCI Alias Disambiguation](./ipd/0009/README.md) |
+
 
 ## Contributing
 

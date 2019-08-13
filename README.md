@@ -18,6 +18,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 7 illumos GCC maintenance](./ipd/0007/README.md) |
 | draft     | [IPD 8 EOF NCA/NL7C](./ipd/0008/README.md) |
 | draft     | [IPD 9 PCI Alias Disambiguation](./ipd/0009/README.md) |
+| draft     | [IPD 10 full argv in ps](./ipd/0010/README.md) |
 
 
 ## Contributing

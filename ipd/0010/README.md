@@ -30,9 +30,9 @@ of `pargs`:
 argv[0]: sendmail: Queue runner@00:15:00 for /var/spool/clientmqueue
 argv[1]: <NULL>
 argv[2]: /var/spool/clientmqueue
-# cat /proc/7228/argv
+# cat /proc/7228/cmdline
 sendmail: Queue runner@00:15:00 for /var/spool/clientmqueue
-     ...  #
+#
 ```
 
 Permissions on this file are `0444`. Note that the usual security boundaries around `/proc`,
@@ -126,8 +126,8 @@ of whether we can read the target process or not.
 ## `pgrep(1)`
 
 `pgrep(1)` and its nom de guerre `pkill(1)` currently only match against
-`pr_psargs[]`. We'll also change those so more than one `-f` argument will use
-`/proc/pid/cmdline`.
+`pr_psargs[]`. We'll also change those so they use `/proc/pid/cmdline`, obeying
+`SHORT_PSARGS` if set.
 
 ## Security issues
 

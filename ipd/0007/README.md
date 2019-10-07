@@ -102,6 +102,8 @@ is for.
 any new compiler version, to see if there's any pernicious things we might want to disable. The list of
 optimizations we need to disable seems to grow every time we update.
 
+1. Check through the list of changes (e.g. https://gcc.gnu.org/gcc-7/changes.html) for anything that might affect us
+
 ## Submitting Patches to GCC
 
 It would be good to begin the process of submitting patches upstream to GCC,

@@ -1,6 +1,6 @@
 ---
 author: Dan McDonald
-state: predraft
+state: draft
 ---
 
 # IPD 6 `allocb`(9F): The `pri` argument, and use of KM_NORMALPRI

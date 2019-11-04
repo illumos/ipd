@@ -35,7 +35,7 @@ Data (ZSD).  Earlier implementations instantiated ZSD for each of:
 
 - NFS Export Table (`nfs_export_t`)
 
-- NFS server instances for common (`struct nfs_srv`), NFSv3 (`struct
+- NFS server instances for NFSv2 (`struct nfs_srv`), NFSv3 (`struct
   nfs3_srv`), and NFSv4 (`struct nfs4_srv`)
 
 - NFS Authentication data
@@ -46,7 +46,7 @@ contains a zone ID, and a link in a list of all per-zone NFS globals.
 One structure needs to be globally tracked, because they directly reference
 vnodes, which are only scoped globally.  Each NFS Export Information
 (`exportinfo_t`) is kept in a global-zone tree.  With this project, each
-`exportinfo_t` also includes a zone ID, AND a backporter to its zone-specific
+`exportinfo_t` also includes a zone ID, AND a backpointer to its zone-specific
 NFS Export Table.  The Implementation section will discuss this linkage
 further.
 
@@ -128,9 +128,9 @@ following sets of ZSD:
 - nfs_globals_t (nfssrv): NFS server ZSD; contains other sub-fields which are
 per-zone:
   - nfs_export_t: NFS Export Table
-  - struct nfs_srv: Generic NFS server state
-  - struct nfs3_srv: NFSv3 state
-  - struct nfs4_srv: NFSv4 state
+  - struct nfs_srv:  NFSv2 server state
+  - struct nfs3_srv: NFSv3 server state
+  - struct nfs4_srv: NFSv4 server state
   - struct nfsauth_globals: NFS Authentication state
 
 - nfscmd_globals_t (nfs): NFS command state for in-zone nfsd.

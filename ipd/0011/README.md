@@ -238,6 +238,10 @@ are now fixed.
 Additional testing is underway in other parts of the community.  Before this
 leaves draft stage, more testing documentation will be in this section.
 
+There are NFS test in illumos-nexenta's usr/src/test, but it's not clear how
+easy they are to upstream, or even use, as they don't have a lot of
+documentation.
+
 ## Potential Future Issues
 
 The sharefs filesystem does not have its own set of privileges that can be

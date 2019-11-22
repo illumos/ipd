@@ -1,6 +1,6 @@
 ---
 author: Dan McDonald
-state: predraft
+state: draft
 ---
 
 # IPD 11 NFS Server for Zones (NFS-Zone)
@@ -11,6 +11,12 @@ Currently the Network File System (NFS) server can only be instantiated in
 the global zone.  This document describes how NFS will be able to instantiate
 in any non-global zone.  This document assumes the reader has some
 understanding of NFS.
+
+illumos issue [11083](https://illumos.org/issues/11083/) tracks the main
+thrust of this effort.  Precursor issues
+[2988](https://illumos.org/issues/2988/) and
+[11945](https://illumos.org/issues/11945) are also part of the fallout from
+this project.
 
 ## History and Fundamentals
 
@@ -150,9 +156,10 @@ root, instead of the global zone's root.
 
 ## Possible man page changes
 
-The initial version of this project made no manual page changes.  A survey of
-manual pages that reference two or more of NFS, zones, or sharefs yielded the
-following list of potential man pages:
+The initial version of this project made no manual page changes, and the
+initial push to illumos-gate may not as well.  A survey of manual pages that
+reference two or more of NFS, zones, or sharefs yielded the following list of
+potential man pages:
 
 ./man1m/dfshares.1m
 
@@ -217,12 +224,32 @@ following list of potential man pages:
 ./man7fs/sharefs.7fs
 
 These should be further audited for possible changes to make administrators
-aware of per-zone NFS service.
+aware of per-zone NFS service.  Distinct illumos bugs should be filed for
+subsequent man page changes.
 
 ## Testing
 
-<XXX KEBE SAYS FILL ME IN.)
+Testing under includes a series of smoke, use, and mild-stress testing on a
+SmartOS compute node that is serving NFS both from its global zone and a
+non-global zone.  It has been done so under both DEBUG and non-DEBUG kernels,
+the former of which found several issues after the initial code drop which
+are now fixed.
+
+Additional testing is underway in other parts of the community.  Before this
+leaves draft stage, more testing documentation will be in this section.
 
 ## Potential Future Issues
 
-XXX ONLY REAL ONE I SEE IMMEDIATELY IS PRIVILEGES FOR SHAREFS
+The sharefs filesystem does not have its own set of privileges that can be
+delegated into a zone.  The sharetab.c source file has a block comment
+describing this:
+
+```
+ * TODO: This basically overloads the definition/use of
+ * PRIV_SYS_NFS to work around the limitation of PRIV_SYS_CONFIG
+ * in a zone. Solaris 11 solved this by implementing a PRIV_SYS_SHARE
+ * we should do the same and replace the use of PRIV_SYS_NFS here and
+ * in zfs_secpolicy_share.
+```
+
+And this should be addressed as a separate bug as well.

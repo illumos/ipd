@@ -20,6 +20,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | draft     | [IPD 9 PCI Alias Disambiguation](./ipd/0009/README.md) |
 | draft     | [IPD 10 full argv in ps](./ipd/0010/README.md) |
 | draft     | [IPD 11 NFS Server for Zones (NFS-Zone)](./ipd/0011/README.md) |
+| draft     | [IPD 12 /proc/<pid>/fdinfo/](./ipd/0012/README.md) |
 
 
 ## Contributing

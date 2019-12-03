@@ -233,19 +233,38 @@ The `Pgcore(3proc)` function will be changed to expect `prfdinfov2_t`
 structures to be passed to its callback, but to convert them to `prfdinfov1_t`
 before writing to the notes section of the core file.
 
+## Implementation
+
+It is proposed to integrate this change as four separate commits:
+
+1. Provide /proc/\<PID\>/fdinfo/\<FD\>
+   There will be no consumers at this point, but the new files will be
+   available under /proc.
+
+1. Update `libproc`, add new API functions and modify existing Pfdinfo
+   The change to the `Pfdinfo()` API will require a small change to `pfiles`
+   so that it can handle receiving a version 2 fdinfo structure, and convert
+   it to version 1.
+
+1. Update `netstat`
+   As described above - use new APIs, cleanup code.
+
+1. Update `pfiles`
+   As described above - simplify and reduce user- to kernel- space round trips.
+
 ## Future work
 
-It may be possible to have `pfiles(1)` gather the required information without
-having to grab processes and inject a worker thread at all.
+It may be possible to have `pfiles(1)` gather the required information
+without having to grab processes and inject a worker thread at all.
 
-The core file format could be updated to accommodate `prfdinfov2_t` structures
-instead of, or alongside, `prfdinfov1_t`.
+The core file format could be updated to accommodate `prfdinfov2_t`
+structures instead of, or alongside, `prfdinfov1_t`.
 
-There is a patched version of `lsof` floating around that uses `pfiles`. It
-would be nice to get this updated to use the new fdinfo files, and to submit
-the patch upstream for illumos support.
+There is a patched version of `lsof` floating around that uses `pfiles`.
+It would be nice to get this updated to use the new fdinfo files, and to
+submit the patch upstream for illumos (and Solaris?) support.
 
-## Examples
+## Examples (from prototype)
 
 ```bash
 # pfiles `pgrep -n sshd` | grep -A6 5:
@@ -285,6 +304,23 @@ the patch upstream for illumos support.
 ```
 
 ```bash
+# ls -l /proc/`pgrep -n sshd`/fdinfo
+total 12
+-r--------   1 af       other        237 Dec  3 13:52 0
+-r--------   1 af       other        237 Dec  3 13:52 1
+-r--------   1 af       other        239 Dec  3 13:52 11
+-r--------   1 af       other        239 Dec  3 13:52 12
+-r--------   1 af       other        237 Dec  3 13:52 2
+-r--------   1 af       other        204 Dec  3 13:52 3
+-r--------   1 af       other        204 Dec  3 13:52 4
+-r--------   1 af       other        332 Dec  3 13:52 5
+-r--------   1 af       other        204 Dec  3 13:52 6
+-r--------   1 af       other        292 Dec  3 13:52 7
+-r--------   1 af       other        300 Dec  3 13:52 8
+-r--------   1 af       other        239 Dec  3 13:52 9
+```
+
+```bash
 # ./fdinfo /proc/`pgrep -n sshd`/fdinfo/5
 Read 340 bytes
                  fd: 5
@@ -319,16 +355,17 @@ MISC 12 / 5 - PR_SOCKOPT_SNDBUF
 00000000: 00 c0 00 00                                      ....
 MISC 12 / 6 - PR_SOCKOPT_RCVBUF
 00000000: 68 f7 01 00                                      h...
-MISC 8 / 7 - PR_SOCKOPT_IP_NEXTHOP
-00000000: 10                                               .
 MISC 16 / 10 - PR_SOCKOPT_TCP_CONGESTION
 00000000: 73 75 6e 72 65 6e 6f 00                          sunreno.
 ```
 
-
 #### Performance improvement
 
-```nodejs
+This is the test script from
+[illumos issue 5397](https://www.illumos.org/issues/5397)
+- by Dave Eddy.
+
+```js
 #!/usr/bin/env node
 var net = require('net');
 var num = +process.argv[2] || 1000;

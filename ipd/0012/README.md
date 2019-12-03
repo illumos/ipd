@@ -238,18 +238,22 @@ before writing to the notes section of the core file.
 It is proposed to integrate this change as four separate commits:
 
 1. Provide /proc/\<PID\>/fdinfo/\<FD\>
+
    There will be no consumers at this point, but the new files will be
    available under /proc.
 
 1. Update `libproc`, add new API functions and modify existing Pfdinfo
+
    The change to the `Pfdinfo()` API will require a small change to `pfiles`
    so that it can handle receiving a version 2 fdinfo structure, and convert
    it to version 1.
 
 1. Update `netstat`
+
    As described above - use new APIs, cleanup code.
 
 1. Update `pfiles`
+
    As described above - simplify and reduce user- to kernel- space round trips.
 
 ## Future work

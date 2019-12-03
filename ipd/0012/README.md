@@ -79,7 +79,7 @@ The files will be mode 0400 and owned by the owner of the process.
 The `prfdinfo_t` structure layout will be changed to the same as the one
 used in Solaris -
 <https://docs.oracle.com/cd/E88353_01/html/E37852/proc-5.html>, although no
-binary compatibility with Solaris is required or intended.
+binary compatibility with Solaris is necessarily required.
 Internally this will be named `prfdinfov2_t`, with the existing structure
 being renamed to `prfdinfov1_t`. A typedef for `prfdinfo_t` will be provided
 as shown below:
@@ -323,5 +323,35 @@ MISC 8 / 7 - PR_SOCKOPT_IP_NEXTHOP
 00000000: 10                                               .
 MISC 16 / 10 - PR_SOCKOPT_TCP_CONGESTION
 00000000: 73 75 6e 72 65 6e 6f 00                          sunreno.
+```
+
+
+#### Performance improvement
+
+```nodejs
+#!/usr/bin/env node
+var net = require('net');
+var num = +process.argv[2] || 1000;
+for (var i = 0; i < num; i++)
+  net.connect(80, 'www....elided...');
+console.log('opened %d sockets', num);
+```
+
+```bash
+# ./sockets &
+[1] 100703
+opened 1000 sockets
+
+# ptime pfiles 100703 >/dev/null
+
+real        0.543506146
+user        0.056559647
+sys         0.335565083
+
+# ptime ./oldpfiles 100703 >/dev/null
+
+real        6.251319408
+user        0.607150599
+sys         3.718054147
 ```
 

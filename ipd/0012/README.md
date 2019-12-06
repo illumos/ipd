@@ -70,7 +70,8 @@ A new per-process directory will be created under `/proc/<PID>/`
 > Each entry is a decimal number corresponding to an open file descriptor in
 > the process.
 >
-> Each file contains a prfdinfo_t structure.
+> Each file contains a prfdinfo_t structure followed by zero or more
+> pr_misc_header_t structures.
 
 The files will be mode 0400 and owned by the owner of the process.
 
@@ -78,45 +79,67 @@ The files will be mode 0400 and owned by the owner of the process.
 
 The `prfdinfo_t` structure layout will be changed to the same as the one
 used in Solaris -
-<https://docs.oracle.com/cd/E88353_01/html/E37852/proc-5.html>, although no
-binary compatibility with Solaris is necessarily required.
-Internally this will be named `prfdinfov2_t`, with the existing structure
-being renamed to `prfdinfov1_t`. A typedef for `prfdinfo_t` will be provided
-as shown below:
+<https://docs.oracle.com/cd/E88353_01/html/E37852/proc-5.html>.
+
+The existing structure will be renamed to `prfdinfo_core_t` to reflect its
+continued use in core files (see below).
 
 ```C
-typedef struct prfdinfov2 {
-    int     pr_fd;          /* file descriptor number */
-    mode_t  pr_mode;        /* (see st_mode in stat(2)) */
-    uint64_t pr_ino;        /* inode number */
-    uint64_t pr_size;       /* file size */
-    int64_t pr_offset;      /* current offset of file descriptor */
-    uid_t   pr_uid;         /* owner's user id */
-    gid_t   pr_gid;         /* owner's group id */
-    major_t pr_major;       /* major number of device containing file */
-    minor_t pr_minor;       /* minor number of device containing file */
-    major_t pr_rmajor;      /* major number (if special file) */
-    minor_t pr_rminor;      /* minor number (if special file) */
-    int     pr_fileflags;   /* (see F_GETXFL in fcntl(2)) */
-    int     pr_fdflags;     /* (see F_GETFD in fcntl(2)) */
-    short   pr_locktype;    /* (see F_GETLK in fcntl(2)) */
-    pid_t   pr_lockpid;     /* process holding file lock (see F_GETLK) */
-    int     pr_locksysid;   /* sysid of locking process (see F_GETLK) */
-    pid_t   pr_peerpid;     /* peer process (socket, door) */
-    int     pr_filler[25];  /* reserved for future use */
-    char    pr_peername[PRFNSZ]; /* peer process name */
-#if __STDC_VERSION__ >= 199901L
-    char    pr_misc[];      /* self describing structures */
-#else
-    char    pr_misc[1];
-#endif
-} prfdinfov2_t;
+/* PRFNSZ is already defined in procfs.h */
+#define PRFNSZ          16      /* Maximum size of execed filename */
 
-typedef prfdinfov2_t prfdinfo_t;
+
+typedef struct prfdinfo {
+    int          pr_fd;          /* file descriptor number */
+    mode_t       pr_mode;        /* (see st_mode in stat(2)) */
+    uint64_t     pr_ino;         /* inode number */
+    uint64_t     pr_size;        /* file size */
+    int64_t      pr_offset;      /* current offset of file descriptor */
+    uid_t        pr_uid;         /* owner's user id */
+    gid_t        pr_gid;         /* owner's group id */
+    major_t      pr_major;       /* major number of device containing file */
+    minor_t      pr_minor;       /* minor number of device containing file */
+    major_t      pr_rmajor;      /* major number (if special file) */
+    minor_t      pr_rminor;      /* minor number (if special file) */
+    int          pr_fileflags;   /* (see F_GETXFL in fcntl(2)) */
+    int          pr_fdflags;     /* (see F_GETFD in fcntl(2)) */
+    short        pr_locktype;    /* (see F_GETLK in fcntl(2)) */
+    pid_t        pr_lockpid;     /* process holding file lock (see F_GETLK) */
+    int          pr_locksysid;   /* sysid of locking process (see F_GETLK) */
+    pid_t        pr_peerpid;     /* peer process (socket, door) */
+    int          pr_filler[25];  /* reserved for future use */
+    char         pr_peername[PRFNSZ]; /* peer process name */
+#if __STDC_VERSION__ >= 199901L
+    uint8_t      pr_misc[];      /* self describing structures */
+#else
+    uint8_t      pr_misc[1];
+#endif
+} prfdinfo_t;
+
+/*
+ * This was previously prfdinfo_t but is now only used in the notes sections
+ * of core files.
+ */
+typedef struct prfdinfo_core {
+    int          pr_fd;
+    mode_t       pr_mode;
+    uid_t        pr_uid;
+    gid_t        pr_gid;
+    major_t      pr_major;       /* think stat.st_dev */
+    minor_t      pr_minor;
+    major_t      pr_rmajor;      /* think stat.st_rdev */
+    minor_t      pr_rminor;
+    ino64_t      pr_ino;
+    off64_t      pr_offset;
+    off64_t      pr_size;
+    int          pr_fileflags;   /* fcntl(F_GETXFL), etc */
+    int          pr_fdflags;     /* fcntl(F_GETFD), etc. */
+    char         pr_path[MAXPATHLEN];
+} prfdinfo_core_t;
 ```
 
-Core files will continue to include `prfdinfov1_t` structures in their notes
-sections.
+Core files will continue to include old format structures in their notes
+sections, as type `prfdinfo_core_t`.
 
 The `pr_misc` element points to the start of a list of additional
 miscellaneous data items, each of which has a header specifying the
@@ -129,10 +152,20 @@ typedef struct pr_misc_header {
 } pr_misc_header_t;
 ```
 
-The `pr_misc_size` field is the sum of the sizes of the header and the
-associated data. The end of the list is indicated by a header with a zero size.
+Each `pr_misc_header_t` starts on an 8-byte boundary with any preceding
+padding space filled with zeros.
 
-The following miscellaneous data types are provided:
+The `pr_misc_size` field is the sum of the sizes of the header and the
+associated data.
+
+The end of the list is indicated by a header with a zero size and an all-ones
+type field, 0xffffffff. Since the size includes the size of the header, a zero
+size cannot appear in a valid header.
+
+The following miscellaneous data types are provided. Those that begin with
+\_\_UNIMPL are currently not implemented for illumos but are included in
+this list as placeholders to retain binary compatibility with the Solaris
+interface.
 
 * PR\_PATHNAME
 * PR\_SOCKETNAME
@@ -144,29 +177,42 @@ The following miscellaneous data types are provided:
 * PR\_SOCKOPT\_IP\_NEXTHOP
 * PR\_SOCKOPT\_IPV6\_NEXTHOP
 * PR\_SOCKOPT\_TYPE
+* \_\_UNIMPL\_PR\_SOCKOPT\_LISTENQLIMIT
 * PR\_SOCKOPT\_TCP\_CONGESTION
+* \_\_UNIMPL\_PR\_SOCKOPT\_FLOW\_NAME
+* \_\_UNIMPL\_PR\_SOCKOPTS\_PRIV
 * PR\_SOCKFILTERS\_PRIV
+
+and there will also be:
+
+* PR\_MISC\_TYPES\_MAX
+
+to indicate the maximum type value.
 
 ## Changes to libproc
 
 1. The `Pfdinfo_iter(3proc)` function will be modified to pass the new
-   format `prfdinfov2_t` to the callback function.
+   format `prfdinfo_t` to the callback function.
 
-1. A number of new API functions will be added to handle `prfdinfov2_t`
+1. A number of new API functions will be added to handle `prfdinfo_t`
    structures. These functions will not require that a process handle be
    held since one of the benefits of the new `/proc/<PID>/fdinfo/` files
    is that they can be read without having to grab the target process.
 
-   1. `prfdinfov2_t *proc_get_fdinfo(pid_t pid, int fd)`
+   1. `prfdinfo_t *proc_get_fdinfo(pid_t pid, int fd)`
 
-      Retrieve a `prfdinfov2_t` structure for an open file in a process.
-      The returned structure must be freed after use.
+      Retrieve a `prfdinfo_t` structure for an open file in a process.
+      The returned structure must be freed after use using `proc_free_fdinfo()`.
 
-   1. `int proc_fdinfo_misc(prfdinfov2_t *, uint_t type, void *optval, size_t *optlen)`
+   1. `void proc_free_fdinfo(prfdinfo_t *info)`
 
-      Scan a `prfdinfov2_t` structure for a miscellaneous item of type `type`
-      and, if found, copy the data to `optval`, update the `optlen` argument
-      and return 0.
+      Free a `prfdinfo_t` structure.
+
+   1. `int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen)`
+
+      Scan a `prfdinfo_t` structure for the first miscellaneous item of
+      type `type` and, if found, copy the data to `optval`, update the
+      `optlen` argument and return 0.
 
       The `optval` and `optlen` arguments identify a buffer in which the value
       for the requested data type is to be returned. `optlen` is a value-result
@@ -177,36 +223,35 @@ The following miscellaneous data types are provided:
       This is analagous to
       [getsockopt(3socket)](https://illumos.org/man/getsockopt).
 
-   1. `prfdinfov2_t *proc_fdinfo_dup(prfdinfov2_t *)`
+   1. `prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *)`
 
-      Duplicate a `prfdinfov2_t` structure and return a pointer to the
-      new copy.
+      Duplicate a `prfdinfo_t` structure and return a pointer to the
+      new copy. This can be used by consumers that want to preserve a copy
+      of a `prfdinfo_t` structure provided as an argument to a callback.
+      The returned structure must be freed after use using `proc_free_fdinfo()`.
 
-   1. `int proc_fdinfo_convertv2(prfdinfov2_t *, prfdinfov1_t **)`
+1. New iterator APIs will be added as follows.
 
-      Convert a `prfdinfov2_t` structure to a `prfdinfov1_t` structure. If it
-      is present, tThe _PR\_PATHNAME_ miscellaneous item from the source
-      structure will be used to populate the `prfdinfov1_t.pr_path` field.
+   1. Iterate a process' open files and receive a pointer to a `prfdinfo_t`
+      structure for each:
 
-   1. `int proc_fdinfo_convertv1(prfdinfov1_t *, prfdinfov2_t **)`
+      ```C
+      typedef int proc_fdwalk_f(const prfdinfo_t *, void *);
+      int proc_fdwalk(pid_t, proc_fdwalk_f *, void *);
+      ```
 
-      Convert a `prfdinfov1_t` structure to a `prfdinfov2_t` structure. If
-      the `prfdinfov1_t.pr_path` field is populated, the resulting
-      `prfdinfov2_t` structure will have a _PR\_PATHNAME_ miscellaneous
-      item.
+   1. Iterate a `prfdinfo_t` structure and receive the data associated with
+      each misc type:
 
-1. A new iterator API will be added which allows iterating open files
-   and receiving a pointer to a `prfdinfov2_t` structure for each:
-
-    ```C
-    typedef int proc_fdwalk_f(prfdinfov2_t *, void *);
-    int proc_fdwalk(pid_t, proc_fdwalk_f *, void *);
-    ```
+      ```C
+      typedef int proc_fdinfowalk_f(const prfdinfo_t *, uint_t type, void *data, size_t len, void *);
+      int proc_fdinfowalk(const prfdinfo_t *, proc_fdinfowalk_f *, void *);
+      ```
 
 ## Changes to netstat
 
 With the above changes in place, netstat can be modified to use the new
-file descriptor iterator, and to retrieve information from the `prfdinfov2_t`
+file descriptor iterator, and to retrieve information from the `prfdinfo_t`
 structures directly, without having to grab and inject calls into the target
 process. The code that currently generates pseudo prfdinfo\_t structures can
 be removed.
@@ -218,20 +263,20 @@ further simplify the code, and have an additional benefit of allowing
 
 ## Changes to pfiles
 
-pfiles will be modified to expect `prfdinfov2_t` structures passed to the
+pfiles will be modified to expect `prfdinfo_t` structures passed to the
 callback function, and to extract data directly from these structures where
 possible rather than injecting system calls into the target process.
 
-It will also be changed to convert `prfdinfov1_t` structures found in core
-files to `prfdinfov2_t` before processing them.
+It will also be changed to convert `prfdinfo_core_t` structures found in core
+files to `prfdinfo_t` before processing them.
 
 ## Changes to core file generation
 
 There will be no changes to in-kernel core file generation.
 
-The `Pgcore(3proc)` function will be changed to expect `prfdinfov2_t`
-structures to be passed to its callback, but to convert them to `prfdinfov1_t`
-before writing to the notes section of the core file.
+The `Pgcore(3proc)` function will be changed to expect `prfdinfo_t`
+structures to be passed to its callback, but to convert them to
+`prfdinfo_core_t` before writing to the notes section of the core file.
 
 ## Implementation
 
@@ -240,13 +285,15 @@ It is proposed to integrate this change as four separate commits:
 1. Provide /proc/\<PID\>/fdinfo/\<FD\>
 
    There will be no consumers at this point, but the new files will be
-   available under /proc.
+   available under /proc. `prfdinfo_t` will remain unchanged in header files
+   and the new structure will be named `prfdinfo_new_t` during the transition.
 
 1. Update `libproc`, add new API functions and modify existing Pfdinfo
 
-   The change to the `Pfdinfo()` API will require a small change to `pfiles`
-   so that it can handle receiving a version 2 fdinfo structure, and convert
-   it to version 1.
+   The change to the `Pfdinfo()` API will require a small temporary change to
+   `pfiles` so that it can handle receiving a new fdinfo structure, and convert
+   it to `prfdinfo_core_t`. This will be superseded by a subsequent update
+   to pfiles.
 
 1. Update `netstat`
 
@@ -261,8 +308,8 @@ It is proposed to integrate this change as four separate commits:
 It may be possible to have `pfiles(1)` gather the required information
 without having to grab processes and inject a worker thread at all.
 
-The core file format could be updated to accommodate `prfdinfov2_t`
-structures instead of, or alongside, `prfdinfov1_t`.
+The core file format could be updated to accommodate the new style `prfdinfo_t`
+structures instead of, or alongside, `prfdinfo_core_t`.
 
 There is a patched version of `lsof` floating around that uses `pfiles`.
 It would be nice to get this updated to use the new fdinfo files, and to

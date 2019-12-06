@@ -199,16 +199,25 @@ to indicate the maximum type value.
    held since one of the benefits of the new `/proc/<PID>/fdinfo/` files
    is that they can be read without having to grab the target process.
 
-   1. `prfdinfo_t *proc_get_fdinfo(pid_t pid, int fd)`
+   1. proc\_get\_fdinfo()
+      ```C
+      prfdinfo_t *proc_get_fdinfo(pid_t pid, int fd)
+      ```
 
       Retrieve a `prfdinfo_t` structure for an open file in a process.
       The returned structure must be freed after use using `proc_free_fdinfo()`.
 
-   1. `void proc_free_fdinfo(prfdinfo_t *info)`
+   1. proc\_free\_fdinfo()
+      ```C
+      void proc_free_fdinfo(prfdinfo_t *info)
+      ```
 
       Free a `prfdinfo_t` structure.
 
-   1. `int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen)`
+   1. proc\_fdinfo\_misc()
+      ```C
+      int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen)
+      ```
 
       Scan a `prfdinfo_t` structure for the first miscellaneous item of
       type `type` and, if found, copy the data to `optval`, update the
@@ -223,7 +232,10 @@ to indicate the maximum type value.
       This is analagous to
       [getsockopt(3socket)](https://illumos.org/man/getsockopt).
 
-   1. `prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *)`
+   1. proc\_fdinfo\_dup()
+      ```C
+      prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *)
+      ```
 
       Duplicate a `prfdinfo_t` structure and return a pointer to the
       new copy. This can be used by consumers that want to preserve a copy

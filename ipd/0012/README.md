@@ -201,7 +201,7 @@ to indicate the maximum type value.
 
    1. proc\_get\_fdinfo()
       ```C
-      prfdinfo_t *proc_get_fdinfo(pid_t pid, int fd)
+      prfdinfo_t *proc_get_fdinfo(pid_t pid, int fd);
       ```
 
       Retrieve a `prfdinfo_t` structure for an open file in a process.
@@ -209,14 +209,14 @@ to indicate the maximum type value.
 
    1. proc\_free\_fdinfo()
       ```C
-      void proc_free_fdinfo(prfdinfo_t *info)
+      void proc_free_fdinfo(prfdinfo_t *info);
       ```
 
       Free a `prfdinfo_t` structure.
 
    1. proc\_fdinfo\_misc()
       ```C
-      int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen)
+      int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen);
       ```
 
       Scan a `prfdinfo_t` structure for the first miscellaneous item of
@@ -234,7 +234,7 @@ to indicate the maximum type value.
 
    1. proc\_fdinfo\_dup()
       ```C
-      prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *)
+      prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *);
       ```
 
       Duplicate a `prfdinfo_t` structure and return a pointer to the

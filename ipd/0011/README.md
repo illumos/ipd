@@ -16,28 +16,29 @@ illumos issue [11083](https://illumos.org/issues/11083/) tracks the main
 thrust of this effort.  Precursor issues
 [2988](https://illumos.org/issues/2988/) and
 [11945](https://illumos.org/issues/11945) are also part of the fallout from
-this project.
+this project, and have been integrated into illumos-gate as of December 2019.
 
 ## History and Fundamentals
 
 Before Oracle closed OpenSolaris, there was a work-in-progress to solve this
-problem.  Unfortunately, even a larval version of it did not escape into the
-open-source world.  Post-illumos, multiple attempts tried to make NFS service
-in a zone (abbreviated to NFS-Zone for the rest of this document).
+problem.  Unfortunately, even a larval version of this work did not escape
+into the open-source world.  Post-illumos, multiple attempts tried to make
+NFS service in a zone (abbreviated to NFS-Zone for the rest of this
+document).
 
-One distro, NexentaStor, managed to implement a version in their child of
-illumos.  This work from Nexenta forms the basis for what is planned to be
+One distribution, NexentaStor, managed to implement a version in their child
+of illumos.  This work from Nexenta forms the basis for what is planned to be
 brought to illumos-gate.
 
 Prior to this project, NFS instantiated its state assuming it would only run
-in the global zone.  This state covers three different modules: `nfssrv` (the
-NFS server kernel module), `klmmod` (kernel lock manager module), and
-`sharefs` (the kernel "sharetab" filesystem).
+in the global zone.  This state spans three different kernel modules:
+`nfssrv` (the NFS server kernel module), `klmmod` (kernel lock manager
+module), and `sharefs` (the kernel "sharetab" filesystem).
 
 ### NFS Server State
 
 A majority of the NFS server state can be instantiated into Zone-Specific
-Data (ZSD).  Earlier implementations instantiated ZSD for each of:
+Data (ZSD).  Prior to this project, modules instantiated ZSD for each of:
 
 - NFS Export Table (`nfs_export_t`)
 
@@ -49,19 +50,19 @@ Data (ZSD).  Earlier implementations instantiated ZSD for each of:
 These are all now pointers from a single `nfs_globals_t` structure, which
 contains a zone ID, and a link in a list of all per-zone NFS globals.
 
-One structure needs to be globally tracked, because they directly reference
-vnodes, which are only scoped globally.  Each NFS Export Information
-(`exportinfo_t`) is kept in a global-zone tree.  With this project, each
-`exportinfo_t` also includes a zone ID, AND a backpointer to its zone-specific
-NFS Export Table.  The Implementation section will discuss this linkage
-further.
+One structure needs to be globally tracked, because each structure instance
+directly references vnodes, which are only scoped globally.  Each NFS Export
+Information (`exportinfo_t`) is kept in a global-zone tree.  With this
+project, each `exportinfo_t` also includes a zone ID, AND a backpointer to
+its zone-specific NFS Export Table.  The Implementation section will discuss
+this linkage further.
 
 ### Kernel Lock Manager State
 
-The kernel lock manager's `struct nlm_globals` already instantiated per-zone.
-This project introduces a cached zone ID (`nlm_zoneid`) to make other
-operations simpler, especially those that use other modules' per-zone data
-structures.
+The kernel lock manager's `struct nlm_globals` are already instantiated
+per-zone.  This project introduces a cached zone ID (`nlm_zoneid`) to make
+other operations simpler, especially those that use other modules' per-zone
+data structures.
 
 ### ShareFS State
 
@@ -111,11 +112,12 @@ always minimally used, the NFS server modules are almost always brought up by
 the first zone that shares via NFS.
 
 SmartOS zones ("joyent" or "joyent-minimal" brand) do NOT have their zone's
-root at a proper filesystem boundary.  In SmartOS a zones/<UUID> dataset gets
-created, and /zones/<UUID>/root is merely a directory in that filesystem.
-This means NFS code that traverses a directory tree upwards until a
-filesystem boundary or "/" must not only check for a filesystem boundary
-(vnode's VROOT flag set), but also check for a vnode that is the zone's root.
+root at a proper filesystem boundary.  In SmartOS a zones/$ZONE_UUID dataset
+gets created, and /zones/$ZONE_UUID/root is merely a directory in that
+filesystem.  This means NFS code that traverses a directory tree upwards
+until a filesystem boundary or "/" must not only check for a filesystem
+boundary (vnode's VROOT flag set), but also check for a vnode that is the
+zone's root.
 
 ### Data Structure Linkages
 
@@ -125,13 +127,13 @@ following sets of ZSD:
 
 #### ALREADY EXISTING
 
-- struct nlm_globals (klmmod): Lock Manager ZSD
+- struct nlm_globals (`klmmod`): Lock Manager ZSD
 
-- struct flock_globals (genunix): File-locking state used exclusively by klmmod
+- struct flock_globals (`genunix`): File-locking state used exclusively by klmmod 
 
 #### NEW WITH THIS PROJECT
 
-- nfs_globals_t (nfssrv): NFS server ZSD; contains other sub-fields which are
+- nfs_globals_t (`nfssrv`): NFS server ZSD; contains other sub-fields which are
 per-zone:
   - nfs_export_t: NFS Export Table
   - struct nfs_srv:  NFSv2 server state
@@ -139,15 +141,15 @@ per-zone:
   - struct nfs4_srv: NFSv4 server state
   - struct nfsauth_globals: NFS Authentication state
 
-- nfscmd_globals_t (nfs): NFS command state for in-zone nfsd.
+- nfscmd_globals_t (`nfs`): NFS command state for in-zone nfsd.
 
 Because of the Lock Manager globals, the NFS Server globals, and the
-needs-to-be-globally-indexed exportinfo_t are all in
+needs-to-be-globally-indexed `exportinfo_t` are all in
 different sets of ZSD, each of these contains a Zone ID in them.  When
 searching both sets of structures from an arbitrary zone context,
 correspondence can be done with Zone ID comparisons.
 
-In some cases (usually involving exportinfo_t), a few pointer dereferences
+In some cases (usually involving `exportinfo_t`), a few pointer dereferences
 can determine a zone's root vnode.  It is important to track this, because as
 pointed out in the Distribution Differences Matter section, in some zone
 brands, the zone's root vnode is NOT a filesystem boundary (i.e. the VROOT
@@ -161,67 +163,37 @@ initial push to illumos-gate may not as well.  A survey of manual pages that
 reference two or more of NFS, zones, or sharefs yielded the following list of
 potential man pages:
 
-./man1m/dfshares.1m
-
-./man1m/dfshares_nfs.1m
-
-./man1m/kadmin.1m
-
-./man1m/kclient.1m
-
-./man1m/mount.1m
-
-./man1m/mount_nfs.1m
-
-./man1m/mountd.1m
-
-./man1m/nfs4cbd.1m
-
-./man1m/nfsd.1m
-
-./man1m/nfslogd.1m
-
-./man1m/nfsmapid.1m
-
-./man1m/nfsstat.1m
-
-./man1m/rquotad.1m
-
-./man1m/share.1m
-
-./man1m/share_nfs.1m
-
-./man1m/shareall.1m
-
-./man1m/sharectl.1m
-
-./man1m/sharemgr.1m
-
-./man1m/statd.1m
-
-./man1m/unshare.1m
-
-./man1m/unshare_nfs.1m
-
-./man1m/zfs.1m
-
-./man4/dfstab.4
-
-./man4/nfs.4
-
-./man4/nfslog.conf.4
-
-./man4/nfssec.conf.4
-
-./man4/rpc.4
-
-./man4/sharetab.4
-
-./man5/nfssec.5
-
-./man5/zones.5
-
-./man7fs/sharefs.7fs
+- `dfshares`(1m)
+- `dfshares_nfs`(1m)
+- `kadmin`(1m)
+- `kclient`(1m)
+- `mount`(1m)
+- `mount_nfs`(1m)
+- `mountd`(1m)
+- `nfs4cbd`(1m)
+- `nfsd`(1m)
+- `nfslogd`(1m)
+- `nfsmapid`(1m)
+- `nfsstat`(1m)
+- `rquotad`(1m)
+- `share`(1m)
+- `share_nfs`(1m)
+- `shareall`(1m)
+- `sharectl`(1m)
+- `sharemgr`(1m)
+- `statd`(1m)
+- `unshare`(1m)
+- `unshare_nfs`(1m)
+- `zfs`(1m)
+- `dfstab`(4)p
+- `nfs`(4)
+- `nfslog.conf`(4)
+- `nfssec.conf`(4)
+- `rpc`(4)
+- `sharetab`(4)
+- `nfssec`(5)
+- `zones`(5)
+- `sharefs`(7fs)
 
 These should be further audited for possible changes to make administrators
 aware of per-zone NFS service.  Distinct illumos bugs should be filed for
@@ -229,18 +201,27 @@ subsequent man page changes.
 
 ## Testing
 
-Testing under includes a series of smoke, use, and mild-stress testing on a
-SmartOS compute node that is serving NFS both from its global zone and a
+Testing thus far includes a series of smoke, use, and mild-stress testing on
+a SmartOS compute node that is serving NFS both from its global zone and a
 non-global zone.  It has been done so under both DEBUG and non-DEBUG kernels,
 the former of which found several issues after the initial code drop which
 are now fixed.
+
+The Linux "nfstest" package:  https://wiki.linux-nfs.org/wiki/index.php/NFStest
+can be used (as long as NFSv4.1 is excluded) as a regression and
+interoperability test.  As of December, 2019, this project's changes have
+not affected the results of the Linux NFS tests.  See
+http://kebe.com/~danmcd/webrevs/nfs-zone/linux-nfs-test/ for results and
+details.  (NOTE: Later these will be moved to the `old` directory inside
+Dan's webrevs directory.)
 
 Additional testing is underway in other parts of the community.  Before this
 leaves draft stage, more testing documentation will be in this section.
 
 There are NFS test in illumos-nexenta's usr/src/test, but it's not clear how
 easy they are to upstream, or even use, as they don't have a lot of
-documentation.
+documentation, and may rely on frameworks not readily available in
+illumos-gate.
 
 ## Potential Future Issues
 

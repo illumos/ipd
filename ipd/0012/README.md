@@ -152,7 +152,7 @@ typedef struct pr_misc_header {
 } pr_misc_header_t;
 ```
 
-Each `pr_misc_header_t` starts on an 8-byte boundary with any preceding
+Each `pr_misc_header_t` starts on an 4-byte boundary with any preceding
 padding space filled with zeros.
 
 The `pr_misc_size` field is the sum of the sizes of the header and the
@@ -162,10 +162,9 @@ The end of the list is indicated by a header with a zero size and an all-ones
 type field, 0xffffffff. Since the size includes the size of the header, a zero
 size cannot appear in a valid header.
 
-The following miscellaneous data types are provided. Those that begin with
-\_\_UNIMPL are currently not implemented for illumos but are included in
-this list as placeholders to retain binary compatibility with the Solaris
-interface.
+The following miscellaneous data types are provided. Some are currently not
+implemented for illumos but are noted in this list and gaps will be left in
+the numbering to retain binary compatibility with the Solaris interface.
 
 * PR\_PATHNAME
 * PR\_SOCKETNAME
@@ -177,10 +176,10 @@ interface.
 * PR\_SOCKOPT\_IP\_NEXTHOP
 * PR\_SOCKOPT\_IPV6\_NEXTHOP
 * PR\_SOCKOPT\_TYPE
-* \_\_UNIMPL\_PR\_SOCKOPT\_LISTENQLIMIT
+* (unimplemented PR\_SOCKOPT\_LISTENQLIMIT)
 * PR\_SOCKOPT\_TCP\_CONGESTION
-* \_\_UNIMPL\_PR\_SOCKOPT\_FLOW\_NAME
-* \_\_UNIMPL\_PR\_SOCKOPTS\_PRIV
+* (unimplemented PL\_PR\_SOCKOPT\_FLOW\_NAME)
+* (unimplemented PL\_PR\_SOCKOPTS\_PRIV)
 * PR\_SOCKFILTERS\_PRIV
 
 and there will also be:
@@ -205,42 +204,25 @@ to indicate the maximum type value.
       ```
 
       Retrieve a `prfdinfo_t` structure for an open file in a process.
-      The returned structure must be freed after use using `proc_free_fdinfo()`.
+      The returned structure must be freed after use using `proc_fdinfo_free()`.
 
-   1. proc\_free\_fdinfo()
+   1. proc\_fdinfo\_free()
       ```C
-      void proc_free_fdinfo(prfdinfo_t *info);
+      void proc_fdinfo_free(prfdinfo_t *info);
       ```
 
       Free a `prfdinfo_t` structure.
 
    1. proc\_fdinfo\_misc()
       ```C
-      int proc_fdinfo_misc(prfdinfo_t *, uint_t type, void *optval, size_t *optlen);
+      const void *proc_fdinfo_misc(const prfdinfo_t *, uint_t type, size_t *len);
       ```
 
       Scan a `prfdinfo_t` structure for the first miscellaneous item of
-      type `type` and, if found, copy the data to `optval`, update the
-      `optlen` argument and return 0.
-
-      The `optval` and `optlen` arguments identify a buffer in which the value
-      for the requested data type is to be returned. `optlen` is a value-result
-      parameter, initially containing the size of the buffer pointed to by
-      optval, and modified on return to indicate the actual size of the value
-      returned.
-
-      This is analagous to
-      [getsockopt(3socket)](https://illumos.org/man/getsockopt).
-
-   1. proc\_fdinfo\_dup()
-      ```C
-      prfdinfo_t *proc_fdinfo_dup(prfdinfo_t *);
-      ```
-
-      Duplicate a `prfdinfo_t` structure and return a pointer to the
-      new copy. This can be used by consumers that want to preserve a copy
-      of a `prfdinfo_t` structure provided as an argument to a callback.
-      The returned structure must be freed after use using `proc_free_fdinfo()`.
+      type `type` and, if found, return a pointer to that data. If not null,
+      the length of that data is stored in the address pointed to by len.
+      On error, this function returns NULL and sets errno to indicate the
+      reason.
 
 1. New iterator APIs will be added as follows.
 
@@ -256,7 +238,7 @@ to indicate the maximum type value.
       each misc type:
 
       ```C
-      typedef int proc_fdinfowalk_f(const prfdinfo_t *, uint_t type, void *data, size_t len, void *);
+      typedef int proc_fdinfowalk_f(uint_t type, const void *data, size_t len, void *);
       int proc_fdinfowalk(const prfdinfo_t *, proc_fdinfowalk_f *, void *);
       ```
 
@@ -292,28 +274,13 @@ structures to be passed to its callback, but to convert them to
 
 ## Implementation
 
-It is proposed to integrate this change as four separate commits:
+It is proposed to integrate this change as two separate commits:
 
-1. Provide /proc/\<PID\>/fdinfo/\<FD\>
-
-   There will be no consumers at this point, but the new files will be
-   available under /proc. `prfdinfo_t` will remain unchanged in header files
-   and the new structure will be named `prfdinfo_new_t` during the transition.
-
-1. Update `libproc`, add new API functions and modify existing Pfdinfo
-
-   The change to the `Pfdinfo()` API will require a small temporary change to
-   `pfiles` so that it can handle receiving a new fdinfo structure, and convert
-   it to `prfdinfo_core_t`. This will be superseded by a subsequent update
-   to pfiles.
+1. Provide /proc/\<PID\>/fdinfo/\<FD\>;
+   Update `libproc`, add new API functions and modify existing Pfdinfo;
+   Update `pfiles`
 
 1. Update `netstat`
-
-   As described above - use new APIs, cleanup code.
-
-1. Update `pfiles`
-
-   As described above - simplify and reduce user- to kernel- space round trips.
 
 ## Future work
 

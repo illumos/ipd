@@ -21,7 +21,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 10 full argv in ps](./ipd/0010/README.md) |
 | draft     | [IPD 11 NFS Server for Zones (NFS-Zone)](./ipd/0011/README.md) |
 | published | [IPD 12 /proc/_PID_/fdinfo/](./ipd/0012/README.md) |
-| draft     | [IPD 13 Safer DDI DMA Cookie Functions](./ipd/0013/README.md) |
+| published | [IPD 13 Safer DDI DMA Cookie Functions](./ipd/0013/README.md) |
 
 
 ## Contributing

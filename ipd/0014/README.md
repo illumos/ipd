@@ -1,9 +1,9 @@
 ---
-author: Dan McDonald (will need others...)
+author: Peter Tribble, Dan McDonald (will need others...)
 state: predraft
 ---
 
-# IPD 11 illumos and Y2038
+# IPD 14 illumos and Y2038
 
 ## Introduction
 
@@ -13,20 +13,66 @@ libraries, and even some kernel modules designed and implemented when
 `time_t` was actually 32-bit.  2038 is the year 2^31-1 seconds after the UNIX
 epoch of GMT-midnight January 1, 1970.
 
-While illumos has eliminated 32-bit kernels in x86/amd64 environments
+While illumos has eliminated 32-bit kernels in x86/amd64 environments, 32-bit
+userland code (commands and libraries) are still supported. Indeed, the vast
+majority, approximately 90%, of illumos utilities are only built 32-bit.
 
-## History and Fundamentals
+The use of 32-bit code may impact other areas beyond time_t. For example,
+there may be applications that have not been updated to deal with large
+files. Another problem may be the use of a 32-bit ino_t, as zfs supports
+many more files on a single filesystem.
 
-XXX KEBE THINKS:  Two obvious choices: Linux-style time32_t/time64_t OR Just
-64-bit It.
-XXX KEBE ALSO THINKS: Just 64-Bit It seems easier BUT it mightn't be
-(e.g. ls(1))
-XXX KEBE SAYS: This is why we have this section.
-XXX KEBE SAYS: Some thing may just need to be EOLed (e.g. UFS)
+## Possible solutions
+
+The problem of large files was addressed within a 32-bit system by adding 
+a new transitional compilation environment for 32-bit software, see
+lfcompile(5). This approach was specifically to allow code to access 64-bit
+quantities at a time when a full 64-bit option was not available. It
+would be possible to define an additional transitional compilation
+environment for a larger time_t (or any other properties). Such an
+approach has recently been added to Linux, for example. However, that
+is aimed at supporting 32-bit hardware beyond 2038.
+
+However, any approach of that type requires software to opt-in, and requires
+applications to be rebuilt from source. Existing binaries cannot be fixed, as
+the 32-bit quantities are embedded.
+
+Given that recompilation is required anyway, and we only support 64-bit
+hardware, it seems much easier to rebuild as 64-bit and be done with it.
+Such an approach would also address any other 32-bit limitations.
+
+## Other areas impacted
+
+It's possible that there may be areas beyond userland applications that
+are impacted. Such as:
+
+* 32-bit timestamps in the UFS on-disk format
 
 ## Implementation
 
+The basic plan is to simply rebuild all libraries and utilities as 64-bit.
+This approach is operationally simple, most utilities can be attacked
+independently, in any order, potentially in parallel, and the work spread
+across multiple contributors.
 
+In most cases, it is envisaged that a new 64-bit utility be created, in
+the relevant 64-bit subdirectory, so that it can be tested. Once found
+acceptable, the 32-bit utility will be removed and replaced by the new
+version.
+
+## Legacy applications
+
+The plan above only covers the artefacts from illumos-gate. Going beyond
+that requires involvement of the various illumos distributions.
+
+The distributions will need to rebuild the applications and packages they
+ship (in many cases the applications will already be 64-bit clean, due to
+exposure to other 64-bit operating systems).
+
+In addition, the distributions and their communities will be a conduit for
+identifying any applications that cannot be recompiled. This information
+would give visibility into the scale of the remaining problem, which would
+inform any decisions as to whether any further work is necessary.
 
 ## Testing
 

@@ -60,6 +60,11 @@ the relevant 64-bit subdirectory, so that it can be tested. Once found
 acceptable, the 32-bit utility will be removed and replaced by the new
 version.
 
+Some apps may not work as well in 64-bit environments because they were
+constrained by the 4Gbyte 32-bit address space. It has been suggested
+that ls(1) is one such app. Utilities built as 64-bit will need to be
+tested functionally, independent of testing for Y2038 itself.
+
 ## Legacy applications
 
 The plan above only covers the artefacts from illumos-gate. Going beyond
@@ -73,6 +78,35 @@ In addition, the distributions and their communities will be a conduit for
 identifying any applications that cannot be recompiled. This information
 would give visibility into the scale of the remaining problem, which would
 inform any decisions as to whether any further work is necessary.
+
+## Workarounds
+
+For those applications that cannot be rebuilt, some workarounds have been
+suggested. They're mentioned here for completeness.
+
+From Andrew Gabriel:
+
+I remember thinking about this some years ago, and had some ideas to
+keep some existing programs working, although nothing works for all
+possible use cases. These would work for programs that simply use it to
+create timestamped log records, but not if they write time_t values out
+to files for storage and use much later, or exchange values with other
+programs. Might still work in some cases if they do calculations on
+time_t too.
+
+One was to have an environment variable which allowed you to respecify
+what date the 32 bit (time_t)0 is.
+
+Another was to assume that it is unsigned, so you lose the ability to
+represent 1901-1969 in exchange for being able to represent 2035-2106.
+Again, might want an environment variable to enable or disable this
+behaviour, although not having it enabled after the 32 bit cutoff date
+would seem pointless.
+
+These should be relatively trivial to implement. (I did implement
+something similar with an LD_PRELOAD interceptor shim in Solaris 8 and
+Solaris 10, although it was for a slightly different purpose.)
+
 
 ## Testing
 

@@ -1,6 +1,6 @@
 ---
 author: Dan McDonald
-state: draft
+state: published
 ---
 
 # IPD 11 NFS Server for Zones (NFS-Zone)
@@ -156,10 +156,10 @@ brands, the zone's root vnode is NOT a filesystem boundary (i.e. the VROOT
 flag is not necessarily set), and in-zone NFS share must stop at the zone
 root, instead of the global zone's root.
 
-## Possible man page changes
+## Man page changes
 
 The initial version of this project made no manual page changes, and the
-initial push to illumos-gate may not as well.  A survey of manual pages that
+initial push to illumos-gate will not as well.  A survey of manual pages that
 reference two or more of NFS, zones, or sharefs yielded the following list of
 potential man pages:
 
@@ -195,33 +195,30 @@ potential man pages:
 - `zones`(5)
 - `sharefs`(7fs)
 
-These should be further audited for possible changes to make administrators
-aware of per-zone NFS service.  Distinct illumos bugs should be filed for
-subsequent man page changes.
+These will be further audited for possible changes to make administrators
+aware of per-zone NFS service.  illumos issue
+[12278](https://illumos.org/issues/12278/) tracks the subsequent man page
+changes.
 
 ## Testing
 
-Testing thus far includes a series of smoke, use, and mild-stress testing on
-a SmartOS compute node that is serving NFS both from its global zone and a
+Testing has included a series of smoke, use, and mild-stress testing on a
+SmartOS compute node that is serving NFS both from its global zone and a
 non-global zone.  It has been done so under both DEBUG and non-DEBUG kernels,
 the former of which found several issues after the initial code drop which
-are now fixed.
+are now fixed.  Some of those same tests were done on an OmniOSce bloody with
+this project, running on VMware Fusion.
 
 The Linux "nfstest" package:  https://wiki.linux-nfs.org/wiki/index.php/NFStest
 can be used (as long as NFSv4.1 is excluded) as a regression and
 interoperability test.  As of December, 2019, this project's changes have
 not affected the results of the Linux NFS tests.  See
 http://kebe.com/~danmcd/webrevs/nfs-zone/linux-nfs-test/ for results and
-details.  (NOTE: Later these will be moved to the `old` directory inside
-Dan's webrevs directory.)
+details.  (NOTE: Later these may be moved to the `old` directory inside
+Dan's webrevs directory, insert "old/" between "webrevs/" and "nfs-zone".)
 
-Additional testing is underway in other parts of the community.  Before this
-leaves draft stage, more testing documentation will be in this section.
-
-There are NFS test in illumos-nexenta's usr/src/test, but it's not clear how
-easy they are to upstream, or even use, as they don't have a lot of
-documentation, and may rely on frameworks not readily available in
-illumos-gate.
+illumos issue [11083](https://illumos.org/issues/11083/) has additional
+testing details.
 
 ## Potential Future Issues
 

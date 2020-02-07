@@ -60,10 +60,30 @@ the relevant 64-bit subdirectory, so that it can be tested. Once found
 acceptable, the 32-bit utility will be removed and replaced by the new
 version.
 
-Some apps may not work as well in 64-bit environments because they were
-constrained by the 4Gbyte 32-bit address space. It has been suggested
-that ls(1) is one such app. Utilities built as 64-bit will need to be
-tested functionally, independent of testing for Y2038 itself.
+## Issues
+
+Utilities built as 64-bit will need to be tested functionally, independent
+of testing for Y2038 itself.
+
+In some cases, 64-bit applications can cause problems as they are not
+constrained by the 32-bit address space, and will consume excessive
+resources rather than fail (the 64-bit ls is not shipped in SmartOS for
+this reason, it appears).
+
+Oracle Solaris are somewhat ahead of us here, and we can take note of
+issues they have reported. For example, issues hit during the 32->64
+conversion were people who had installed 32-bit PAM modules without 64-bit
+versions (though this could happen with any interface that allows for
+external plugin modules), and impacts of the larger fd limit in 64-bit
+programs (such as huge select masks or loops over all possible fd's needing
+to be converted to closefrom()/fdwalk() calls). There's a [public
+discussion](https://blogs.oracle.com/solaris/moving-oracle-solaris-to-lp64-bit-by-bit-v2)
+available.
+
+Known items with issues:
+
+* pam_smb_passwd
+* topo plugins
 
 ## Legacy applications
 

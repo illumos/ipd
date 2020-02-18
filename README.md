@@ -24,6 +24,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 13 Safer DDI DMA Cookie Functions](./ipd/0013/README.md) |
 | predraft  | [IPD 14 illumos and Y2038](./ipd/0014/README.md) |
 | predraft  | [IPD 15 bhyve integration/upstream](./ipd/0015/README.md) |
+| draft     | [IPD 16 EOF SunOS 4 binary compatibility](./ipd/0016/README.md) |
 
 
 ## Contributing

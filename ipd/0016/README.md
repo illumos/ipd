@@ -26,6 +26,10 @@ Removal of ucblib is not within the scope of this project.
 
 This project proposes to remove both libbc and aoutexec.
 
+It has subsequently come to light that the file libmp.so.1 is also
+present for SunOS 4 binary compatibility, and can be removed. This file
+is shipped for both SPARC and intel.
+
 ## Related issues:
 
 * [Bug 12292](https://www.illumos.org/issues/12292) retire libbc

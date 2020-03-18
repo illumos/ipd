@@ -1,6 +1,7 @@
 ---
 authors: Peter Tribble, Toomas Soome
-state: draft
+sponsor: Joshua M. Clulow <josh@sysmgr.org>
+state: published
 ---
 
 # IPD 16 EOF SunOS 4 binary compatibility

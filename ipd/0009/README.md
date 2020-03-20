@@ -1,6 +1,6 @@
 ---
 authors: Robert Mustacchi <rm@joyent.com>
-state: draft
+state: published
 ---
 
 # IPD 9 PCI Alias Disambiguation

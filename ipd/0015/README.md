@@ -1,6 +1,7 @@
 ---
 author: Andy Fiddaman, Hans Rosenfeld, Patrick Mooney
-state: predraft
+state: draft
+mail: https://illumos.topicbox.com/groups/developer/Tcc767c8497fb4c78/ipd-15-bhyve-integration-upstreaming
 ---
 
 # IPD 15 bhyve integration/upstream

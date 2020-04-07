@@ -122,10 +122,10 @@ issue.
 
 10. Add HMA framework
 
-   Add a hypervisor management framework to allow KVM and bhyve to co-exist.
+    Add a hypervisor management framework to allow KVM and bhyve to co-exist.
 
-   This will require distributions to make concurrent changes to KVM and
-   Virtualbox if they ship them.
+    This will require distributions to make concurrent changes to KVM and
+    Virtualbox if they ship them.
 
 ### 2. Bhyve (driver and userland component)
 

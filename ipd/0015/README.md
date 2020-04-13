@@ -1,6 +1,7 @@
 ---
 author: Andy Fiddaman, Hans Rosenfeld, Patrick Mooney
-state: draft
+sponsor: Joshua M. Clulow <josh@sysmgr.org>
+state: published
 mail: https://illumos.topicbox.com/groups/developer/Tcc767c8497fb4c78/ipd-15-bhyve-integration-upstreaming
 ---
 

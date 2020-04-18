@@ -25,6 +25,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 14 illumos and Y2038](./ipd/0014/README.md) |
 | published | [IPD 15 bhyve integration/upstream](./ipd/0015/README.md) |
 | published | [IPD 16 EOF SunOS 4 binary compatibility](./ipd/0016/README.md) |
+| draft     | [IPD 17 SMF Runtime Directory Creation Support](./ipd/0017/README.md)
 
 
 ## Contributing

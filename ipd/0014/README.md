@@ -5,6 +5,8 @@ state: predraft
 
 # IPD 14 illumos and Y2038
 
+![Y2038 is coming, pardon the US-centric date layout and assumption of UTC.](Y2038-warning.png "Y2038 is coming, pardon the US-centric date layout and assumption of UTC.")
+
 ## Introduction
 
 The Year 2038 problem (Y2038) is a shorthand for the class of problems

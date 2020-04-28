@@ -1,6 +1,4 @@
-Illumos port of FreeBSD's HAST (High Available STorage)...
-
-Please reference... https://github.com/stacepellegrino/illumos/tree/master/HAST
+# Illumos port of FreeBSD's HAST (High Available STorage)... #
 
 This is regarding the port of FreeBSD's HAST (High Available Storage) to Illumos and assoicated distributions, with the scope to extend functionality regarding:
 
@@ -18,7 +16,7 @@ The original source code of concern can be found here...
 
 Further development should be done with the inclusion of iSCSI shared block-devices, and also support for more nodes than just the current limit of two, therefore adding the capability of a potential stretched cluster configuration.
 
-This development of HAST as proposed could be an underlying layer to the development of HAS-ME (High Available Shared-Memory Entanglement) and zLockstep (the "z" is for zones), part of an overall Illumos HA framework (see [ https://github.com/stacepellegrino/illumos/tree/master/HAS-ME for more information on this HA framework).
+This development of HAST as proposed could be an underlying layer to the development of HAS-ME (High Available Shared-Memory Entanglement) and zLockstep (the "z" is for zones), part of an overall Illumos HA framework (see https://github.com/stacepellegrino/illumos/tree/master/HAS-ME for more information on this HA framework).
 
 
 stacey.pellegrino@gmail.com

@@ -7,7 +7,7 @@ state: published
 
 ## Introduction
 
-Currently the Network File System (NFS) server can only be instantiated in
+Formerly the Network File System (NFS) server can only be instantiated in
 the global zone.  This document describes how NFS will be able to instantiate
 in any non-global zone.  This document assumes the reader has some
 understanding of NFS.

@@ -26,7 +26,8 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 15 bhyve integration/upstream](./ipd/0015/README.md) |
 | published | [IPD 16 EOF SunOS 4 binary compatibility](./ipd/0016/README.md) |
 | draft     | [IPD 17 SMF Runtime Directory Creation Support](./ipd/0017/README.md)
-
+| predraft  | [IPD 18 Illumos port of FreeBSD's HAST (High Available STorage)...](./ipd/0018/README.md) |
+| predraft  | [IPD 19 Illumos HA framework: HAS-ME (High Available Shared-Memory Entanglement)...](./ipd/0019/README.md) |
 
 ## Contributing
 

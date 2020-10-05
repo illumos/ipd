@@ -57,15 +57,15 @@ VXLAN, providing the Virtual eXtensible Local Area Network protocol,
 
 Three search plugins are implemented:
 
- o direct
+ * direct
    A point-to-point module that can be used to create an overlay that forwards
    all non-local traffic to a single destination.
 
- o files
+ * files
    A plugin that specifies where traffic should be sent based on a mapping
    file.
 
- o svp
+ * svp
    A dynamic plugin that uses a proprietry protocol (portlan) to look up the
    destination address for a frame.
 

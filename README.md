@@ -26,7 +26,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 15 bhyve integration/upstream](./ipd/0015/README.md) |
 | published | [IPD 16 EOF SunOS 4 binary compatibility](./ipd/0016/README.md) |
 | draft     | [IPD 17 SMF Runtime Directory Creation Support](./ipd/0017/README.md)
-
+| draft     | [IPD 18 overlay network integration/upstream](./ipd/0018/README.md)
 
 ## Contributing
 

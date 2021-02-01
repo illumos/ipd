@@ -93,13 +93,15 @@ It is proposed to upstream code from OmniOS in three phases:
 
 ## Commits
 
-The commits which are propsed for the three phases are as follows. Each
+The commits which are proposed for the three phases are as follows. Each
 change will also be updated as per current gate standards including removal
 of lint targets and cleanups to whitespace etc.
 
 > NB: Commits without an OS-xxxx ID are from OmniOS rather than Joyent SmartOS
 
 1. Pre-requisites
+
+  > Each of these will be reviewed and integrated separately.
 
 * OS-3894 want librename
 * OS-3886 Implement id\_space as a library
@@ -114,6 +116,8 @@ of lint targets and cleanups to whitespace etc.
 * OS-4009 Want UDP src port hashing for VXLAN
 
 2. Main commit
+
+  > This will be reviewed and integrated as one.
 
 * OS-3000 I for one, welcome my overlay network overlords
 
@@ -182,6 +186,8 @@ of lint targets and cleanups to whitespace etc.
    * overlay: Add package manifest
 
 3. Follow-ups
+
+  > Each of these will be reviewed and integrated separately.
 
 * Add missing overlay class to show-link description
 * Add stderr as default varpd bunyan stream

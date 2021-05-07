@@ -82,3 +82,6 @@ to undertake, where SPARC support presents a barrier today includes:
 1. **Delete the SPARC code from the tree** *(coming months)*
    - Care must be taken not to break anything, but one benefit of dropping the platform is cleaning up a _lot_ of code that is mostly not relevant anymore so we should likely do this deliberately and not just clean up occasional files "as we go"
    - Even though there will be just one architecture after the removal, any machinery that exists to support multiple architectures must be kept to enable future porting work (e.g., ARM or RISC-V)
+   - We should retain support for interpreting SPARC _data_ where it is not in the way; e.g.,
+     - `mdb` can retain support for SPARC core files, ELF notes, etc
+     - `dis`, `libdisasm`, etc, can continue to disassemble SPARC program text

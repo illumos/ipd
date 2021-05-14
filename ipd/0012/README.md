@@ -1,6 +1,6 @@
 ---
 authors: Andy Fiddaman <andy@omnios.org>
-state: draft
+state: published
 ---
 
 # IPD 12 /proc/\<pid\>/fdinfo/

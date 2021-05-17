@@ -685,35 +685,44 @@ specific subsystem and then executes it.
 
 === libfakekernel
 
-This system is not documented and therefore it's hard to know exactly
-what it provides and how to use it. It seems to have been developed by
-Nexenta as a way to test their SMB2 implementation from userland, and
-it was inspired by the approach taken in ZFS's libzpool.
+This system is the closest to ktest in terms of what you can test, but
+it takes the exact opposite approach in that it brings bits of the
+kernel to userland for testing (as opposed to ktest which brings the
+tests to the kernel). The only documentation I could find on this are
+Gordon Ross's slides from illumos day 2014 [<<libfakekernel>>].
 
-It takes the _opposite_ approach of ktest, and tries to lift some of
-the main kernel components _into_ userland as a library. This allows
-kernel code to be compiled in userland, linked to this library, and
-then run as if it was executing in the kernel. This provides easier
-access to auotmated testing as well as easier source-level debugging
-(though if that's your big want we should instead just add
-source-level debugging to mdb).
+This idea was based on libzpool, and allowed Nexenta to accelerate
+testing efforts when working on enhancements to SMB. Importantly, it
+allowed them to perform source-level debugging on the SMB kernel code,
+which they found very helpful. The ktest framework, by virtue of
+running in the kernel, will not offer such a feature, but one thing I
+would love to see is adding source-level debugging to mdb (perhaps a
+future IPD).
 
-While this approach is laudable, I think it's more complicated and not
-sustainable. It requires bringing all of the DDI/DKI that your module
-relies on into userland. It must then emulate this API in userland
-somehow in a way that provides consistent semantics with the kernel.
-While this is easy for some APIs (e.g., kmem), it is probably much
-harder for others. Furthermore, it requires duplicate code both in
-terms of the DDI/DKI as well as the module-under-test. Not to mention
-other potential booby traps like compilation differences.
+The challenges with this approach are that you need to make sure to
+bring over all of the DDI/DKI that your kernel module requires, into
+userland. This API then needs to be emulated in some way, which may or
+may not be straightforward, depending on the nature of the API. Then
+you need to bring over your module-under-test into userland as well, I
+believe duplicating the code and perhaps tweaking it to work as a user
+library? Honestly I'm a bit unclear on how much effort this is but
+looking at SMB it appears there is a `libfk...` version for many of
+the `uts` files. Finally, I also wonder if there are differences in
+compilation to consider here. That is, if you want to make sure your
+test is executed precisely how it would be executed inside the kernel,
+I wonder if differences in compilation (compiler, flags, etc.) could
+cause edge cases here.
 
-The ktest facility avoids all of this by bringing the tests to the
-kernel. Everything is there already, no faking required. Furthermore,
-in some ways, funnily enough, debugging via DTrace is easier once in
-the kernel (fbt vs. pid), and if you have a complicated test that
-needs deep debugging you could always use DTrace to force a panic of
-the kernel on a specific test failure in order to perform post-mortem
-debugging with mdb.
+The ktest facility avoids this additional work, and potential edge
+cases, by placing the test in actual kernel context, compiled as any
+other kernel module would be. The main thing you lose is source-level
+debugging, and for that you should continue to use libfakekernel.
+
+So while these two overlap a lot they take fundamentally different
+approaches, and I think both are useful. Also, there is no reason to
+convert anything currently using libfakekernel. The work was already
+done, it already exists, and its useful to those who use it. There's
+no reason both can't exist.
 
 === simnet
 
@@ -764,6 +773,7 @@ should have its own.
 
 == References
 
+- [[[libfakekernel]]] https://www.slideshare.net/gordonross/illumos-day-smb2
 - [[[resurrect-simnet]]] https://zinascii.com/2019/resurrecting-simnet.html[Resurrecting Simnet]
 - [[[simnet-basics]]] https://zinascii.com/2019/simnet-basics.html[Simnet Basics]
 - [[[ipd-theory]]] https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/inet/ipd/ipd.c#L16

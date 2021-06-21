@@ -64,7 +64,8 @@ to undertake, where SPARC support presents a barrier today includes:
 - retiring the now-ancient GCC 4.4.4 shadow compiler that remains chiefly
   to support the SPARC platform
 - use of newer GCC versions and newer C standards to enable improvements
-  such as better compile-time assertions (`CTASSERT()`)
+  such as better compile-time assertions (`CTASSERT()`, see
+  [12994](https://www.illumos.org/issues/12994), etc)
 - cleanup of some of the internals of [mac(9E)](https://illumos.org/man/9E/mac)
   which have some facilities that exist only for specific SPARC hardware
 - reworking of some of the interpreted programs in `usr/src/tools` with faster

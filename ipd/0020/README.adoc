@@ -1,3 +1,4 @@
+:tabsize: 8
 :toc:
 :toclevels: 5
 
@@ -95,7 +96,7 @@ The currency in the world of ktest is the test. Test modules register
 tests; the ktest facility lists and executes them. But while ktest may
 be testing C functions, that doesn't mean it must also live in the
 land of the flat namespace. Instead, ktest provides a three-level
-namspace, also known as the "test triple".
+namespace, also known as the "test triple".
 
 .the test triple
 ----
@@ -183,7 +184,7 @@ resources or failure caused by some system not directly related to
 what you are testing. These will be most typical in setup code that
 may need to interact with the kernel at large in order to setup the
 context needed for your specific test. Importantly, its a condition
-which stops the test from making its pass/fail assesment.
+which stops the test from making its pass/fail assessment.
 
 `ktest_result_skip(ktest_ctx_hdl_t *, const char *, ...)`:: This result
 indicates that the test lacks the required context to execute. The
@@ -312,6 +313,88 @@ stream, along with its length.
 void ktest_get_input(const ktest_ctx_hdl_t *ctx, uchar_t *input, size_t *len)
 ----
 
+=== Testing Private Functions
+
+A test module that can't test `static` functions is going to be
+severely limited in its usefulness. After all, these are often the
+functions doing some of the most important work, and are most likely
+to be amenable to testing -- in that they often rely less on global
+context and more on their arguments. However, as they are `static`
+functions, their linkage is limited to that of the module-under-test.
+The ktest facility works around this by dynamically loading the
+function object into the test module via another set of `ktest(9F)`
+APIs.
+
+.APIs for `static` function access
+----
+int ktest_hold_mod(const char *module, ddi_modhandle_t *hdl)
+int ktest_get_fn(ddi_modhandle_t hdl, const char *fn_name, void **fn)
+void ktest_release_mod(ddi_modhandle_t hdl)
+----
+
+The test module must perform four steps when accessing a `static`
+function.
+
+1. The test module must recreate the function prototype in order for
+   it to properly make use of the function pointer. This is probably
+   best done as a `typedef`. For each test function that makes use of
+   this function, the test module should declare a local variable to
+   hold the function pointer, using the `typedef`.
+
+2. The test module must get a handle to the module-under-test in order
+   to use the `ddi_modsym(9F)` API. This is done via
+   `ktest_hold_mod(9F)`. Acquiring this handle also puts a hold on the
+   module, and thus the API is framed in such a way as to remind the
+   user to perform the subsequent release.
+
+3. The test module must fill in the function pointer via
+   `ktest_get_fn(9F)`, after which the function pointer may be used
+   the same as it would be in the module-under-test.
+
+4. The test module must release the module handle via
+   `ktest_release_mod(9F)`.
+
+The typical pattern looks something like the following.
+
+.using a `static` function in a test module
+----
+typedef boolean_t (*mac_sw_cksum_ipv4_t)(mblk_t *, uint32_t, ipha_t *,
+    const char **);
+
+void
+mac_sw_cksum_ipv4_tcp_test(ktest_ctx_hdl_t *ctx)
+{
+	ddi_modhandle_t hdl = NULL;
+	mac_sw_cksum_ipv4_t mac_sw_cksum_ipv4 = NULL;
+
+	<... snip ...>
+
+	if (ktest_hold_mod("mac", &hdl) != 0) {
+		ktest_result_error(ctx, "failed to hold 'mac' module");
+		return;
+	}
+
+	if (ktest_get_fn(hdl, "mac_sw_cksum_ipv4",
+	   (void **)&mac_sw_cksum_ipv4) != 0) {
+		ktest_result_error(ctx, "failed to resolve symbol %s`%s",
+		    "mac", "mac_sw_cksum_ipv4");
+		goto cleanup;
+	}
+
+	<... snip ...>
+
+	KT_ASSERTG(mac_sw_cksum_ipv4(mp, ehsz, ip, &err), ctx, cleanup);
+
+	<... snip ...>
+
+cleanup:
+	if (hdl != NULL)
+		ktest_release_mod(hdl);
+
+	<... snip ...>
+}
+----
+
 === Registering Tests
 
 The ktest facility tracks tests through various private objects which
@@ -353,7 +436,7 @@ all the tests/suites are created and added to the test module object.
 The ktest facility does not dictate where your test modules live,
 either in their source or binary form, nor how those modules are
 loaded. The facility's goal is to provide a means for registering,
-listing, and executing tests, but not necessairly dictate all the
+listing, and executing tests, but not necessarily dictate all the
 terms and conditions of how that is done. That said, there are general
 conventions that we should strive to follow.
 
@@ -369,7 +452,7 @@ For example, the mblk routines in the "STREAMS subsystem" are part of
 `genunix`. But `genunix` covers a lot of ground, and `genunix_test.c`
 would be a pretty big source file. It makes more sense to create a
 `stream_test.c` next to the `stream.c` file and create a `stream_test`
-module that execises the various stream APIs in `genunix`.
+module that exercises the various stream APIs in `genunix`.
 
 Test modules, like system libraries, should come welded to the system
 -- the source code for the test module should live in illumos-gate.
@@ -385,15 +468,15 @@ at least give the ktest facility its own package, which includes only
 the means to register, list, and execute tests, but does not deliver
 any tests itself. Things get more interesting when determining how
 test modules should be delivered. The following is a table of
-potential options and their tradeoffs.
+potential options and their trade-offs.
 
 |===
-|Delivery| Tradeoffs
+|Delivery| Trade-offs
 
 |1. All in-gate tests delivered in ktest package. Deliver all in-gate
  test modules as part of the ktest package.
 a|* One package gives you everything.
-* No test modules delivered unless you absoltely want them.
+* No test modules delivered unless you absolutely want them.
 * Delivers test modules for modules that may not be attached and that
 have no relevance to your system .
 
@@ -409,7 +492,7 @@ a|* Only the necessary test
 |3. Same as previous, but don't require ktest dependency.
 a|* Same benefits as above, but test execution can only happen if the
 user decides to also install ktest. Otherwise the test modules lay
-doormant on the filesystem (not loaded).
+dormant on the filesystem (not loaded).
 
 |===
 
@@ -441,7 +524,7 @@ should only occur as a direct result of executing the `ktest` command.
 The ktest device may only be accessed from the Global Zone by a
 process with the `PRIV_SYS_DEVICES` privilege. While ktest is primarily
 meant as a development tool for a development environment, you could
-also use it as a healthcheck for a production system during
+also use it as a health check for a production system during
 pre-flight. For that reason the ktest device does not allow arbitrary
 users to access it given it's essentially a vector to execute
 arbitrary code you want in the kernel (much like any use of
@@ -462,13 +545,13 @@ a|Select the fields you wish to output.
 a|`-p`
 a|Write output in "parsable" format.
 
-a|`-r`
-a|TODO: "Raw output". Pretty sure I was just using this for debugging.
-This might go away.
-
 |===
 
 ==== Loading/Listing Test Modules
+
+By default `mod-load` searches for test modules in the search
+directories and attempts to load each one in turn. The `-l` option
+lists their status only, and does not attempt to load.
 
 .loading/listing test modules
 ----
@@ -490,8 +573,13 @@ stream_test         loaded   /kernel/misc/ktest/amd64/stream_test
 mac_test            loaded   /kernel/misc/ktest/amd64/mac_test
 ----
 
-By default `mod-load` searches for test modules under the following
-directories.
+.mod-load options
+|===
+|Option| Description
+
+a|`-l`
+a|List all modules found in the search directories and their current status.
+|===
 
 .test module search dirs
 ----
@@ -499,13 +587,10 @@ directories.
 /usr/kernel/misc/ktest/amd64
 ----
 
-* TODO: Should these paths be stored in a config file?
-* TODO: Should there be an option to set/add to this list?
-* TODO: Should there be an environment variable to control the path list?
-
 ==== Listing Tests
 
-The `list` command lists all registered tests.
+The `list` command lists all registered tests. One or more triples may
+be specified to narrow the listing.
 
 .ktest list usage
 ----
@@ -531,23 +616,14 @@ The `run` command executes registered tests and reports their results.
 
 .ktest run usage
 ----
-ktest [-o fields] [-p] run [-N] [-i input ] [-f runfile|'-'] filter...
+ktest [-o fields] [-p] run [-N] [-i input ] [-f runfile|'-'] triple...
 ----
 
-The simplest thing you can do is run all reigstered tests. Unlike the
+The simplest thing you can do is run all registered tests. Unlike the
 `list` command, the `run` command does not assume you want to run all
 tests if given no input. Rather, it always requires an explicit input
 to avoid the accidentally running of all tests. But running all tests
-is still easy enough, just pass the `*` filter.
-
-`ktest(1M)` imposes this restriction because the ktest device provides
-no means of cancellation. As the number of tests grow over time we
-want to save the user from starting a long running task they didn't
-intend.
-
-* TODO: This is something I could fairly easily address by adding
-  cancellation. I just didn't want to hold up this prototype any
-  longer.
+is still easy enough, just pass the `*` triple.
 
 .ktest run all tests
 ----
@@ -642,12 +718,28 @@ SKIP:mac_dummy_skip_test::The king stay the king.
 PASS:mac_dummy_input_test:/var/tmp/browsing.snoop:
 ----
 
-==== `ktest run` and `usr/src/test`
+.run options
+|===
+|Option| Description
 
-The `run` command provides some great interactive support, but its
-real use is going to come from integration with `usr/src/test`. That
-is, we will use test scripts in `usr/src/test` to drive the ktest test
-modules. This is where the `-f runfile` option comes.
+a|`-f <runfile>`
+a|Specify a runfile. The `-` character may be used to indicate stdin.
+
+
+a|`-i <input stream file>`
+a|Specify a file to act as the input stream for all tests requiring input.
+
+a|`-N`
+a|Elide the statistics output at the end of the run.
+
+|===
+
+==== ktest and `usr/src/test`
+
+The `run` command provides interactive support, but its real use is
+going to come from integration with `usr/src/test` -- using test
+scripts in `usr/src/test` to drive the ktest test modules. This is
+where the `-f runfile` option comes.
 
 The ktest runfile is very similar to the `run` command, except that
 the triples are specified in a file, and each triple, partially or
@@ -676,7 +768,7 @@ or lack the ability to test the kernel in-full like ktest can.
 === usr/src/test
 
 This is the framework for userland testing. It provides scaffolding
-for describing, organizing, runnings, and reporting on tests. This is
+for describing, organizing, running, and reporting on tests. This is
 used fairly heavily by some systems to test both userland and kernel
 components. Though the later testing is of course indirect, by way of
 userland APIs, system calls, and ioctls. This framework is
@@ -690,7 +782,7 @@ This system is the closest to ktest in terms of what you can test, but
 it takes the exact opposite approach in that it brings bits of the
 kernel to userland for testing (as opposed to ktest which brings the
 tests to the kernel). The only documentation I could find on this are
-Gordon Ross's slides from illumos day 2014 [<<libfakekernel>>].
+Gordon Ross's slides from illumos day 2014 <<libfakekernel>>.
 
 This idea was based on libzpool, and allowed Nexenta to accelerate
 testing efforts when working on enhancements to SMB. Importantly, it
@@ -728,19 +820,19 @@ no reason both can't exist.
 === simnet
 
 The simnet device provides a pseudo mac device (also known as a mac
-provider). This is a device that implemens the mac(9E) interface but
+provider). This is a device that implements the mac(9E) interface but
 is purely virtual and allows user configuration via the `dladm(1M)`
 command. This is a very powerful device when combined with bridges, IP
 routing, and zones, because it allows full emulating of an arbitrary
 network on one host. However, this is obviously a very specialized
 form of testing. It is complimentary to ktest. Unfortunately we
 currently don't document simnet, but you can find out more at my blog
-[<<resurrect-simnet>>] [<<simnet-basics>>].
+<<resurrect-simnet>> <<simnet-basics>>.
 
 === Internet Packet Disturber (IPD)
 
 The internet packet disturber (or `ipd` for short) is a little known
-tool created by Robert Mustacchi. It is used to simlate congested and
+tool created by Robert Mustacchi. It is used to simulate congested and
 lossy networks where they don't actually exist. This allows one to
 test how upper layer connection-based protocols, like TCP, handle a
 lossy network. Useful for testing say TCP congestion algorithms and
@@ -749,7 +841,7 @@ protocols react to such a network. Once again, this is a specialized
 testing tool which is complimentary to ktest.
 
 To find out more see Robert's lovely big-theory statement on ipd
-[<<ipd-theory>>] and see the ipdadm(1M) man page[<<ipdadm>>].
+<<ipd-theory>> and see the ipdadm(1M) man page <<ipdadm>>.
 
 === pshot: Psuedo Bus Nexus Driver
 
@@ -771,11 +863,10 @@ think any of these things overlap with ktest, and I also don't think
 ktest should be delivered as part of this package. Rather, I think it
 should have its own.
 
-
 == References
 
-- [[[libfakekernel]]] https://www.slideshare.net/gordonross/illumos-day-smb2
-- [[[resurrect-simnet]]] https://zinascii.com/2019/resurrecting-simnet.html[Resurrecting Simnet]
-- [[[simnet-basics]]] https://zinascii.com/2019/simnet-basics.html[Simnet Basics]
-- [[[ipd-theory]]] https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/inet/ipd/ipd.c#L16
-- [[[ipdadm]]] https://illumos.org/man/1m/ipdadm[ipdadm(1M)]
+* libfakekernel[[libfakekernel]]: https://www.slideshare.net/gordonross/illumos-day-smb2
+* resurrect-simnet[[resurrect-simnet]]: https://zinascii.com/2019/resurrecting-simnet.html
+* simnet-basics[[simnet-basics]]: https://zinascii.com/2019/simnet-basics.html
+* ipd-theory[[ipd-theory]]: https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/inet/ipd/ipd.c#L16
+* ipadm[[ipadm]]: https://illumos.org/man/1m/ipdadm

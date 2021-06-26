@@ -103,7 +103,7 @@ namspace, also known as the "test triple".
 ----
 
 Module:: The top of the namespace, typically named after the
-module-under-test. The convention is to apennd the `_test` suffix to
+module-under-test. The convention is to append the `_test` suffix to
 the module-under-test. For example, the `mac` module might have a
 `mac_test` test module. However, there is no hard rule that a test
 module must be named after its module-under-test, it's merely a
@@ -417,16 +417,16 @@ I think we should go with option (3). We should deliver test-modules
 with their module-under-test, but only load/run them when the ktest
 facility is installed (and even then they would not be loaded until
 the user specifically requests that one or more test-modules be
-loaded).
+loaded). Furthermore, all test modules will be given some type of
+facet tag, like `facet.test`, so that test module installation may be
+disabled via `pkg change-facet test=false`.
 
-As these test-modules are misc-type modules, they should be delivered
-in the misc module directories. However, in order not to pollute the
-`misc/` directory, it makes sense to place them under a `ktest/`
-subdir.
+As these test modules are misc-type modules, they are delivered in the
+`misc` module directory. However, in order not to pollute the `misc/`
+directory, they are placed in their own `ktest/` subdirectory.
 
 .ktest test modules home
 ----
-/kernel/misc/ktest/amd64
 /usr/kernel/misc/ktest/amd64
 ----
 
@@ -438,12 +438,13 @@ and ktest facility. That is, unless done through some other means like
 `modload`, all test module loading, unloading, listing, and running
 should only occur as a direct result of executing the `ktest` command.
 
-The ktest device may only be accessed by root from the Global Zone.
-While ktest is primarily meant as a development tool for a development
-environment, you could also use it as a healthcheck for a production
-system during pre-flight. For that reason the ktest device does not
-allow arbitrary users to access it given it's essentially a vector to
-execute arbitrary code you want in the kernel (much like any use of
+The ktest device may only be accessed from the Global Zone by a
+process with the `PRIV_SYS_DEVICES` privilege. While ktest is primarily
+meant as a development tool for a development environment, you could
+also use it as a healthcheck for a production system during
+pre-flight. For that reason the ktest device does not allow arbitrary
+users to access it given it's essentially a vector to execute
+arbitrary code you want in the kernel (much like any use of
 `add_drv(1M)` or `modload(1M)`).
 
 .ktest usage
@@ -742,7 +743,7 @@ The internet packet disturber (or `ipd` for short) is a little known
 tool created by Robert Mustacchi. It is used to simlate congested and
 lossy networks where they don't actually exist. This allows one to
 test how upper layer connection-based protocols, like TCP, handle a
-lossy netowrk. Useful for testing say TCP congestion algorithms and
+lossy network. Useful for testing say TCP congestion algorithms and
 retransmit behavior. It's also useful to see how any application-layer
 protocols react to such a network. Once again, this is a specialized
 testing tool which is complimentary to ktest.

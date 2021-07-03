@@ -65,7 +65,7 @@ The rest of this section is spent discussing the architecture and API
 of ktest. But before going further, it's worth just seeing what running
 `ktest` looks like.
 
-.run all reigstered tests
+.run all registered tests
 ----
 rpz@thunderhead:~$ pfexec ktest run '*'
 RESULT MODULE      SUITE           TEST
@@ -176,14 +176,14 @@ this function to indicate that one of its conditions was violated. The
 test should set the format string and variadic arguments to build a
 helpful message describing which condition failed and why.
 
-`ktest_result_error(ktest_ctx_hdl_t *, const char *, ...)`:: This result
-indicates that the test encountered an _unexpected_ error. An
+`ktest_result_error(ktest_ctx_hdl_t *, const char *, ...)`:: This
+result indicates that the test encountered an _unexpected_ error. An
 unexpected error is one that is not directly related to the logic the
 test is trying to exercise. This may be failure to acquire needed
 resources or failure caused by some system not directly related to
 what you are testing. These will be most typical in setup code that
 may need to interact with the kernel at large in order to setup the
-context needed for your specific test. Importantly, its a condition
+context needed for your specific test. Importantly, it's a condition
 which stops the test from making its pass/fail assessment.
 
 `ktest_result_skip(ktest_ctx_hdl_t *, const char *, ...)`:: This result
@@ -743,9 +743,9 @@ The integration with `usr/src/test` isn't as straightforward as I
 first thought. To do it "right", each ktest test should be listed
 separately in the `usr/src/test` run file. This requires setting up a
 new script for each individual test. This isn't so bad for a few
-tests, but as the test list grows this becomes unwiedly. It would be
+tests, but as the test list grows this becomes unwieldy. It would be
 nice to extend the `usr/src/test` test runner so that you could
-specify a test name plus command to run, like `mac_chceksum_foo =
+specify a test name plus command to run, like `mac_checksum_foo =
 "ktest run mac:checksum:foo"`. Or extend it to have direct
 understanding of how ktest works and allow some additional syntax in
 the run file for supporting that. So while integration between these
@@ -780,7 +780,7 @@ $ pfexec ktest run -f /var/tmp/example.run
 
 There are several components in illumos already that facilitate some
 of what ktest is proposing, but they are either more narrow in scope
-or lack the ability to test the kernel in-full like ktest can.
+or lack the ability to test the kernel in full like ktest can.
 
 === usr/src/test
 
@@ -789,7 +789,7 @@ for describing, organizing, running, and reporting on tests. This is
 used fairly heavily by some systems to test both userland and kernel
 components. Though the later testing is of course indirect, by way of
 userland APIs, system calls, and ioctls. This framework is
-complimentary to ktest. I envision us adding tests to various sub
+complementary to ktest. I envision us adding tests to various sub
 directories in here where the test defines a ktest runfile for that
 specific subsystem and then executes it.
 
@@ -842,7 +842,7 @@ is purely virtual and allows user configuration via the `dladm(1M)`
 command. This is a very powerful device when combined with bridges, IP
 routing, and zones, because it allows full emulating of an arbitrary
 network on one host. However, this is obviously a very specialized
-form of testing. It is complimentary to ktest. Unfortunately we
+form of testing. It is complementary to ktest. Unfortunately we
 currently don't document simnet, but you can find out more at my blog
 <<resurrect-simnet>> <<simnet-basics>>.
 
@@ -855,18 +855,18 @@ test how upper layer connection-based protocols, like TCP, handle a
 lossy network. Useful for testing say TCP congestion algorithms and
 retransmit behavior. It's also useful to see how any application-layer
 protocols react to such a network. Once again, this is a specialized
-testing tool which is complimentary to ktest.
+testing tool which is complementary to ktest.
 
 To find out more see Robert's lovely big-theory statement on ipd
 <<ipd-theory>> and see the ipdadm(1M) man page <<ipdadm>>.
 
-=== pshot: Psuedo Bus Nexus Driver
+=== pshot: Pseudo Bus Nexus Driver
 
 This is a pseudo device that allows one to create an arbitrarily
 complex device tree. It looks like this tool was created by Garrett
 D'Amore and provides something similar, in spirit, to simnet, but
 instead targets PCI devices. Once again, this feels like a
-complimentary tool.
+complementary tool.
 
 === Miscellaneous
 

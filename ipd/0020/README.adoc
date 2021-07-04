@@ -35,7 +35,7 @@ For many of us coming to kernel development for the first time there
 is often a moment of clarity when we realize the kernel is just
 another program. Sure, it's a "special" program, responsible for
 controlling the hardware and bringing order to the city of userspace
-programs, but at the end of the day its a program nonetheless. It's
+programs, but at the end of the day it's a program nonetheless. It's
 mostly written in C, and C programs are just collections of functions,
 and it turns out those functions can often be tested directly. But the
 big eureka moment, at least for me, was to realize that to properly
@@ -753,7 +753,7 @@ two systems is totally doable, it will not be part of the initial
 ktest commit.
 ====
 
-The `run` command provides interactive support, but its real use is
+The `run` command provides interactive support, but it's real use is
 going to come from integration with `usr/src/test` -- using test
 scripts in `usr/src/test` to drive the ktest test modules. This is
 where the `-f runfile` option comes.
@@ -831,7 +831,7 @@ debugging, and for that you should continue to use libfakekernel.
 So while these two overlap a lot they take fundamentally different
 approaches, and I think both are useful. Also, there is no reason to
 convert anything currently using libfakekernel. The work was already
-done, it already exists, and its useful to those who use it. There's
+done, it already exists, and it's useful to those who use it. There's
 no reason both can't exist.
 
 === simnet

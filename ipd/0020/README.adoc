@@ -753,7 +753,7 @@ two systems is totally doable, it will not be part of the initial
 ktest commit.
 ====
 
-The `run` command provides interactive support, but it's real use is
+The `run` command provides interactive support, but its real use is
 going to come from integration with `usr/src/test` -- using test
 scripts in `usr/src/test` to drive the ktest test modules. This is
 where the `-f runfile` option comes.

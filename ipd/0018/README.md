@@ -177,6 +177,7 @@ of lint targets and cleanups to whitespace etc.
    * OS-4928 overlay\_files.4 broken with new mandoc
    * OS-5377 stack overflow from round trip through mac and overlay
    * OS-7088 cyclics corked on overlay socket with full queue (#335)
+   * OS-8245 varpd, -fstack-protector woes
    * dladm: remove unused function prototype
    * varp no-longer needs -lnsl
    * dladm now links with libvarpd (fix rcm)

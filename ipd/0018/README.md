@@ -1,6 +1,6 @@
 ---
 author: Andy Fiddaman
-sponsor:
+sponsor: Dan McDonald
 state: draft
 ---
 
@@ -119,10 +119,11 @@ of lint targets and cleanups to whitespace etc.
 
   > This will be reviewed and integrated as one.
 
-* OS-3000 I for one, welcome my overlay network overlords
+* [13500 Want support for "overlay" networks](https://www.illumos.org/issues/13500)
 
   Including:
 
+   * OS-3000 I for one, welcome my overlay network overlords
    * OS-3943 want vxlan support
    * OS-3945 want varpd direct plugin
    * OS-3946 want varpd files plugin
@@ -176,8 +177,11 @@ of lint targets and cleanups to whitespace etc.
    * OS-6175 fix manual pages for newer mdoc lint
    * OS-4928 overlay\_files.4 broken with new mandoc
    * OS-5377 stack overflow from round trip through mac and overlay
-   * OS-7088 cyclics corked on overlay socket with full queue (#335)
    * OS-8245 varpd, -fstack-protector woes
+
+  The following changes from OmniOS  will be part of the same commit but
+  uploaded as a separate patch set to aid review:
+
    * dladm: remove unused function prototype
    * varp no-longer needs -lnsl
    * dladm now links with libvarpd (fix rcm)
@@ -195,6 +199,7 @@ of lint targets and cleanups to whitespace etc.
 * Show a better error message when a VNIC cannot be brought up on an overlay
   network due to the encapsulation plugin being unable to bind a socket
 * Overlays should persist across reboots
+* OS-7088 cyclics corked on overlay socket with full queue (#335)
 
 ## References
 

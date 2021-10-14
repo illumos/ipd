@@ -75,11 +75,12 @@ to undertake, where SPARC support presents a barrier today includes:
 
 ## Strategy and Timeline
 
-1. **Stop accepting changes to code for SPARC** *(immediate)*
+1. **Replace GCC 4.4.4 shadow with GCC 10 shadow** *(done, see [bug
+   14149](https://www.illumos.org/issues/14149))*
 1. **Update project documentation to make a clear statement about platform support** *(immediate)*
    - e.g., https://illumos.org/docs/about/#supported-hardware-platforms
-1. **Replace GCC 4.4.4 shadow with a GCC version greater than 7** *(coming months)*
-   - Coordinate with folks doing warning cleanup for newer GCC builds
+   - Only 64-bit x86 systems are supported
+1. **Stop accepting changes to code for SPARC** *(immediate)*
 1. **Delete the SPARC code from the tree** *(coming months)*
    - Care must be taken not to break anything, but one benefit of dropping the platform is cleaning up a _lot_ of code that is mostly not relevant anymore so we should likely do this deliberately and not just clean up occasional files "as we go"
    - Even though there will be just one architecture after the removal, any machinery that exists to support multiple architectures must be kept to enable future porting work (e.g., ARM or RISC-V)

@@ -1,6 +1,6 @@
 ---
 authors: Joshua M. Clulow <josh@sysmgr.org>
-sponsor: Robert Mustacchi <rm@fingolfin.org>
+sponsors: Robert Mustacchi <rm@fingolfin.org>, Garrett D'Amore <garrett@damore.org>
 state: published
 ---
 

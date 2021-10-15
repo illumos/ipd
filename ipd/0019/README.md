@@ -1,7 +1,7 @@
 ---
 authors: Joshua M. Clulow <josh@sysmgr.org>
-sponsor: -
-state: draft
+sponsor: Robert Mustacchi <rm@fingolfin.org>
+state: published
 ---
 
 # IPD 19 Sunset SPARC

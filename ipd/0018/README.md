@@ -201,6 +201,21 @@ of lint targets and cleanups to whitespace etc.
 * Overlays should persist across reboots
 * OS-7088 cyclics corked on overlay socket with full queue (#335)
 
+## Future Work
+
+This initial work brings the overlay implementation from SmartOS and OmniOS
+into gate as-is, in a way that is useful today. Possible future work items
+include:
+
+* Better inter-operability with other VXLAN implementations, such as those
+  that use multicast (inc. FreeBSD - the pluggable nature of varpd means
+  that it will be possible to add a multicast resolver plugin).
+  Inter-operability with Solaris and VMware's NSX could also be investigated.
+
+* Overlays currently only support the VTEP (VXLAN tunnel endpoint) being
+  instantiated in the global zone's netstack. It would be useful to add the
+  ability to select a zone's netstack to be used for this underlay network.
+
 ## References
 
 * https://man.omnios.org/man5/overlay.5.html

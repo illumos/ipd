@@ -29,6 +29,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | draft     | [IPD 18 overlay network integration/upstream](./ipd/0018/README.md)
 | published | [IPD 19 Sunset SPARC](./ipd/0019/README.md)
 | draft     | [IPD 20 Kernel Test Facility](./ipd/0020/README.adoc)
+| predraft  | [IPD 21 PCI Platform Unification](./ipd/0021/README.md)
 
 ## Contributing
 

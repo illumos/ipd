@@ -1,6 +1,6 @@
 ---
 authors: Robert Mustacchi <rm@fingolfin.org>
-state: predraft
+state: draft
 ---
 
 # IPD 21 PCI Platform Unification
@@ -57,7 +57,7 @@ factored this way, even inside of the existing PCI code. For example:
 generalized.
 
 * The PCIe bridge driver is mostly common code, with a bit of platform
-specific code (e.g. pcieb_x86.c and historically pcieb_sparc.c).
+specific code (e.g. `pcieb_x86.c` and historically `pcieb_sparc.c`).
 
 * PCIe cfgacc bits are mostly common today, with callouts into platform
 specific code.
@@ -65,6 +65,16 @@ specific code.
 This is a good step in the right direction, we just need to take this
 another step further and continue this across the broader PCIe
 implementation.
+
+Finally, there are a bunch of changes that are coming in the industry
+with respect to PCIe hotplug. In particular, there are more and more
+platform-specific features being added such as the system firmware
+intermediary, different error containment mechanisms, and more. Most of
+this spurned on by the adoption of NVMe. This means that there are going
+to be more and more platform-specific pieces over time, which really
+emphasizes the importance of having a solid, common foundation. We don't
+want to repeat a large chunk of the current per-platform enumeration
+history going forward.
 
 ### Proposal
 

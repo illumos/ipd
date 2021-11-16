@@ -1,6 +1,6 @@
 ---
 authors: Robert Mustacchi <rm@fingolfin.org>
-state: draft
+state: published
 ---
 
 # IPD 13 Safer DDI DMA Cookie Functions

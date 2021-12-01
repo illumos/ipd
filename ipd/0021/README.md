@@ -151,3 +151,22 @@ prevalent for better and for worse.
 
 * We could finally make the x86 `pci_autoconfig` module actually common
 code, which would make it simpler to support a broader set of platforms.
+
+### Stability
+
+An important thing to emphasize is that the PCI PRD, or really any of
+the intended `<sys/plat/*.h>` headers are always intended to be private
+to illumos. This is impotant for a few reasons:
+
+1. We don't know the righ interfaces and what we need will change as we
+have more ports land.
+
+2. Unlike leaf device drivers which are able to be fairly isolated, this
+is not true of this part of the system. If someone has their own
+platform, that is going to be hard to maintain as a stable interface and
+would overly constrain us.
+
+Nothing in this IPD should be construed as suggesting that these will be
+stable, rather this is just a way to improve the situation for us and
+make it easier for us to maintain the system and support additional
+platforms.

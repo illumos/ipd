@@ -156,9 +156,9 @@ code, which would make it simpler to support a broader set of platforms.
 
 An important thing to emphasize is that the PCI PRD, or really any of
 the intended `<sys/plat/*.h>` headers are always intended to be private
-to illumos. This is impotant for a few reasons:
+to illumos. This is important for a few reasons:
 
-1. We don't know the righ interfaces and what we need will change as we
+1. We don't know the right interfaces and what we need will change as we
 have more ports land.
 
 2. Unlike leaf device drivers which are able to be fairly isolated, this

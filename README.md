@@ -30,6 +30,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | published | [IPD 19 Sunset SPARC](./ipd/0019/README.md)
 | draft     | [IPD 20 Kernel Test Facility](./ipd/0020/README.adoc)
 | draft     | [IPD 21 PCI Platform Unification](./ipd/0021/README.md)
+| draft     | [IPD 22 Unsharing shared Libraries](./ipd/0022/README.md)
 
 ## Contributing
 

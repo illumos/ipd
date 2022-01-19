@@ -3,7 +3,7 @@ authors: Joshua M. Clulow <josh@sysmgr.org>
 state: predraft
 ---
 
-# Xen and the Art of Operating System Maintenance: A Removal of a Platform
+# IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform
 
 ## Goal
 
@@ -78,3 +78,48 @@ of `uts/i86pc`, as with other drivers, or possibly even to `uts/intel`, as with
 Once these drivers are moved aside, we should remove the rest of the
 `uts/i86xpv` tree altogether, and anything else that builds software specific
 to the `i86xpv` platform.
+
+### Xen HVM `cmdk` stub driver
+
+An unfortunate historical decision in Xen means that block devices are often
+exposed concurrently via two separate storage controller interfaces: an
+emulated PCI IDE controller, and the Xen `xdf` device.  To prevent confusion,
+we must not try to access the disks via IDE, preferring `xdf`.
+
+PCI IDE devices on illumos involve several drivers: at the top, the `pci-ide`
+nexus binds to the `pciclass,0101` alias.  That driver then uses `cmdk`, the
+ATA disk driver, to attach child nodes for detected disks.
+
+To prevent `cmdk` from attaching on Xen HVM systems, we have invented the
+fiction of an "`i86hvm` semi-platform".  A stub module that does nothing is
+delivered as `/platform/i86hvm/kernel/drv/amd64/cmdk` and it would appear we
+prefer modules in `/platform/i86hvm` to `/platform/i86pc` on Xen HVM.
+
+Another historical wart is that we do not appear to register `pci-ide` through
+`/etc/driver_aliases`, but rather through the obscure and outdated
+`/boot/solaris/devicedb/master` database.  This should likely be corrected
+first.  Then, we can either modify `pci-ide` to ignore Xen devices, or provide
+a HVM-specific stub device that will attach to a Xen-specific alias.
+
+In an AWS guest, we can see the PCI device has these aliases:
+
+* `pci8086,7010.5853.1.0`
+* `pci8086,7010.5853.1`
+* `pci5853,1,s`
+* `pci5853,1`
+* `pci8086,7010.0`
+* `pci8086,7010,p`
+* `pci8086,...7010`
+* `pciclass,010180`
+* `pciclass,0101`
+
+It would, as is becoming a theme, regrettably seem that _every_ PCI device Xen
+exposes has the same subsystem ID, `0001`.  Fortunately, `pci8086,7010.5853.1`
+would represent the combination of Xen and (emulated) 82371SB PIIX3 IDE, and
+we could bind a stub driver to that.
+
+Alternatively, `pci-ide` could refuse to enumerate devices when Xen is the
+vendor.
+
+Other than `cmdk` stub shenanigans, the rest of the "semi-platform" can likely
+be collapsed into `i86pc` without further issues.

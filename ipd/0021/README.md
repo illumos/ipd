@@ -1,6 +1,7 @@
 ---
 authors: Robert Mustacchi <rm@fingolfin.org>
-state: draft
+sponsors: Dan McDonald <danmcd@joyent.com>
+state: published
 ---
 
 # IPD 21 PCI Platform Unification

@@ -1,7 +1,7 @@
 ---
 author: Andy Fiddaman
 sponsor: Dan McDonald
-state: draft
+state: published
 ---
 
 # IPD 18 overlay network integration/upstream

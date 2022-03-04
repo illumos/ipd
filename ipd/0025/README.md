@@ -13,12 +13,11 @@ which can be assigned to a user or role. A user or role can access the
 additional rights of profiles assigned to them by entering a profile shell
 (which is a shell process which has the `PRIV_PFEXEC` privilege flag set) or by
 using the `pfexec` command to set this flag for a single command. However,
-there is currently no way of requiring additional authentication here, which
-presents risks; for example, a user working within a profile shell may not
-realise that they are using these rights. This lack of authentication has also
-prevented full RBAC adoption in some environments, with administrators
-preferring to use a tool such as `sudo` instead, with the additional risks
-that brings over the illumos model.
+there is currently no way of requiring additional authentication here, unlike
+switching to a role or using a utility like `sudo`. A user working in a profile
+shell may not realise that they are unecessarily executing commands with
+additional privileges, and the lack of authentication prevents full RBAC
+adoption in some environments.
 
 ## Proposal
 
@@ -107,34 +106,44 @@ If neither or both of these flags is specified, then both lists are searched.
 > There is also a private `_enum_profs()` function used by a small number of
 > components, which will need similar changes.
 
-## libsecdb`chkauthattr()
+## chkauthattr()
 
-TBD
+`chkauthattr()` and `_enum_auths()` in libsecdb will need adjustments so that
+they do not consider authorisations covered by a profile which requires
+authentication, unless the requesting process has the new `PRIV_PFEXEC_AUTH`
+privilege. Since `chkauthattr()` takes a username argument, this should only
+be done if the username matches the uid of the calling process.
 
 ## getent(1)
 
 `getent` does not require any updates. It does not parse the content of
 user\_attr entries.
 
+## userattr(1)
+
+`userattr` does not require any updates since it works with generic key/value
+pairs.
+> There is no man page for this utility; one should be written.
+
 ## profiles(1)
 
 The `profiles` command will be extended to be able to show only entries
-from either the unauthenticated or authenticated profile set. It's currently
-unclear whether the default output should include both and if the output
-should include an indication of which set each is in. For example, consider
-the following user:
+from either the unauthenticated or authenticated profile set, and to show
+additional information if requested. It is currently proposed that the default
+output will be unchanged and show both unauthenticated and authenticated
+profiles.
 
 ```
-% getent user_attr bob
-bob::::type=normal;auths=solaris.zone.login/testzone;
-    profiles=Zone Management;
-    auth_profiles=Software Installation,Service Management
+% userattr profiles bob
+Zone Management
+% userattr auth_profiles bob
+Software Installation,Service Management
 ```
 
 Looking at both authenticated and unauthenticated profiles, with no
 annotation, would produce this output (`Software Installation` brings
-`ZFS File System Management` along for the ride). This includes the profiles
-granted to all users via policy.conf.
+`ZFS File System Management` along for the ride). This also includes the
+profiles granted to all users via policy.conf.
 
 ```
 % profiles
@@ -149,34 +158,43 @@ All
 Possible options for restricting the output could look like this:
 
 ```
-% profiles -X
-(Showing unauthenticated privilege set)
+% profiles -X			# show only 'profiles'
 Zone Management
 Basic Solaris User
 All
 ```
 and
 ```
-% profiles -x
-(Showing authenticated privilege set)
+% profiles -x			# show only 'auth_profiles'
 Software Installation
 ZFS File System Management
 Service Management
+```
+
+with a new `-v` option to add more detail, such as the authentication
+requirement:
+
+```
+% profiles -v
+Software Installation (Authentication required)
+ZFS File System Management (Authentication required)
+Zone Management (Authentication required)
+Service Management
+Basic Solaris User
+All
 ```
 
 A further useful enhancement to `profiles` would be the addition of a
 `-c` option to look up profiles based on a specific command.
 
 ```
-% profiles -c /usr/bin/pkg -l
-      Software Installation
+% profiles -c /usr/bin/pkg -lv bob
+bob:
+      Software Installation (Authentication required)
           /usr/bin/pkg               uid=0
       All
           *
 ```
-
-An indication of whether this requires authentication would seem useful
-here too.
 
 ## useradd(1)
 
@@ -215,8 +233,8 @@ As above, a new `-X` option will be added here too.
 
 ppriv already has an undocumented command line option to set the `PRIV_PFEXEC`
 flag in a process, `-P`. A new option to set the new `PRIV_PFEXEC_AUTH` flag
-will be added. It may be time to rework this to take a more generic `-F`
-option for controlling privilege flags - e.g. `-F +d` to enable privilege
+will be added. It may be time to rework this to take a more generic `-f`
+option for controlling privilege flags - e.g. `-f +D` to enable privilege
 debugging.
 
 ## setpflags(2)
@@ -229,6 +247,12 @@ privilege.
 
 As per `setpflags`, setting the `PRIV_PFEXEC_AUTH` flag via this interface
 will also require the `PRIV_PROC_SETID` privilege.
+
+## Auditing
+
+`execve(2) with pfexec` is already audited by the kernel. A new `pfauth`
+audit event will be added to record the success or failure of the
+authentication phase.
 
 ## Caching
 
@@ -244,9 +268,9 @@ Authentication required for 'Software Installation' profile
 Password:
 Refreshing catalog 2/2 openindiana.org
 
-bob@bloody:~% profiles -xlc /usr/bin/id bob
-bob: (authenticated privilege set)
-      Auth pfexec test
+bob@bloody:~% profiles -vXlc /usr/bin/id bob
+bob:
+      xtest (Authentication required)
           /usr/bin/id                uid=0
 
 bob@bloody:~% /usr/bin/id

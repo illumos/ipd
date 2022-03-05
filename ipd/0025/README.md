@@ -88,7 +88,7 @@ command.
                       |                                                  |
                       +--------------------------------------------------+
 
-## libsecdb`getexecuser()
+## exec\_attr - libsecdb`getexecuser()
 
 The `getexecuser()` function in `libsecdb` has the following signature:
 
@@ -98,7 +98,7 @@ The `getexecuser()` function in `libsecdb` has the following signature:
 The `search_flag` parameter will be extended to accept two new flags to control
 which of the authenticated and unauthenticated profile sets is searched.
 
-* `GET_PROF` - search only the unauthenticated profile list.
+* `GET_PROF` - search only the **un**authenticated profile list.
 * `GET_AUTHPROF` - search only the authenticated profile list.
 
 If neither or both of these flags is specified, then both lists are searched.
@@ -106,13 +106,51 @@ If neither or both of these flags is specified, then both lists are searched.
 > There is also a private `_enum_profs()` function used by a small number of
 > components, which will need similar changes.
 
-## chkauthattr()
+## auth\_attr - Authorisations
 
-`chkauthattr()` and `_enum_auths()` in libsecdb will need adjustments so that
-they do not consider authorisations covered by a profile which requires
-authentication, unless the requesting process has the new `PRIV_PFEXEC_AUTH`
-privilege. Since `chkauthattr()` takes a username argument, this should only
-be done if the username matches the uid of the calling process.
+Checking a user's authorisations is primarily done through the `chkauthattr()`
+function. With the introduction of authenticated rights profiles, this will
+need extending so that it can determine whether the authenticated profiles
+should be taken into account when checking whether a user has a particular
+authorisation. The basis for considering the authenticated profiles will be
+whether the uid of the calling process matches the uid of the requested user
+and whether that process has the new `PRIV_PFEXEC_AUTH` process flag.
+
+In many places the authorisation is checked from a server process which is not
+running as the user being checked. To support this, rather than modifying the
+existing `chkauthattr()` function, I propose to introduce a variant -
+`chkauthattr_ucred()` - which takes an additional argument by which the
+caller can provide a ucred which should be checked for the `PRIV_PFEXEC_AUTH`
+flag.
+
+Some authorisations are usable without a call to `pfexec`. For example, the
+`Service Management` profile grants the following authorisations and has no
+exec\_entries.:
+
+```
+% getent prof_attr Service\ Management
+Service Management:::Manage services:auths=solaris.smf.manage,solaris.smf.modify
+% getent exec_attr Service\ Management
+%
+```
+
+For users/roles which are granted a profile like this via `auth_profiles`,
+a mechanism is needed whereby they can be prompted for authentication. To
+support this, new helper profiles will be introduced that cover the
+necessary commands, but have no attributes defined in the exec\_attr entry.
+This will cause `pfexecd` to request authentication but fall back to the
+standard execution path once authenticated (or directly if granted via just
+`profiles`).
+
+A helper profile for `Service Management` could look like:
+
+```
+% getent prof_attr Service\ Management\ (auth)
+Service Authentication:::Authenticated profile helper:
+% getent exec_attr Service\ Management\ (auth)
+Service Management (auth):solaris:cmd:::/usr/sbin/svcadm:
+Service Management (auth):solaris:cmd:::/usr/sbin/svccfg:
+```
 
 ## getent(1)
 

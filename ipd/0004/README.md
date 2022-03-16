@@ -1,6 +1,7 @@
 ---
 authors: Joshua M. Clulow <josh@sysmgr.org>
-state: draft
+sponsor: Richard Lowe <richlowe@richlowe.net>
+state: published
 ---
 
 # IPD 4 Manual Page Section Renumbering

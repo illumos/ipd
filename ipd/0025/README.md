@@ -8,30 +8,66 @@ state: draft
 
 ## Introduction
 
-The illumos Role-Based Access Control (RBAC) system includes Rights Profiles
-which can be assigned to a user or role. A user or role can access the
-additional rights of profiles assigned to them by entering a profile shell
-(which is a shell process which has the `PRIV_PFEXEC` privilege flag set) or by
-using the `pfexec` command to set this flag for a single command. However,
-there is currently no way of requiring additional authentication here, unlike
-switching to a role or using a utility like `sudo`. A user working in a profile
-shell may not realise that they are unecessarily executing commands with
-additional privileges, and the lack of authentication prevents full RBAC
-adoption in some environments.
+RBAC (role-based access control) is an alternative to the traditional
+all-or-nothing superuser security model. With RBAC, privileged functions
+can be assigned to specific user accounts, or to special accounts called
+roles. Roles are an optional part of RBAC (despite the name!) but when they
+are used, roles are assigned to users and those users can assume the role
+in order to access the additional privileges assigned to it. This is typically
+done via the
+[su(8)](https://illumos.org/man/8/su) command, and the user will be required
+to authenticate with either the role password or their own password, depending
+on the role's `roleauth` attribute in the
+[user\_attr(5)](https://illumos.org/man/5/user_attr) database.
+
+Users (and roles) can be assigned `Authorisations` which are unique strings
+that represent a right to perform some operation or class of operation. For
+example, a user who is afforded the `solaris.smf.manage` authorisation is
+able to manage SMF services. These authorisations are typically checked
+programmatically by applications, using
+[chkauthattr(3SECDB)](https://illumos.org/man/3SECDB/chkauthattr).
+
+Users (and roles) can also be assigned `Profiles`. A Profile is a named
+collection of authorisations and commands with attributes specifying
+additional privileges with which the command should be run, or an alternative
+user or group ID. These commands and their additional privileges are defined
+in the [exec\_attr(5)](https://illumos.org/man/5/exec_attr) database.
+
+Users/roles gain access to the functions afforded by their assigned profiles
+using the [pfexec(1)](https://illumos.org/man/1/pfexec) command. pfexec has no
+special privileges (it is not, for example, a setuid binary), it just sets the
+`PRIV_PFEXEC` privilege flag on itself (which any process can do) and then
+calls [exec(2)](https://illumos.org/man/2/exec) to run the target command. The
+kernel sees the flag and asks `pfexecd` for any additional privileges that
+should be afforded. There are also _profile shells_ which are shell variants
+which have the `PRIV_PFEXEC` flag set on them, so that every command they
+invoke inherits the flag and will elevate privileges automatically. It is
+fairly typical for a role account to use one of these as its shell so that,
+after assuming a role, an administrator does not need to prefix every command
+with `pfexec`.
+
+One thing that is missing in the current implementation, is the ability to
+assign profiles to users (or roles) and require an additional authentication
+step before elevating privileges, something which is a commonly used feature
+of utilities like sudo(8), and the lack of which prevents full RBAC adoption
+in some environments.
 
 ## Proposal
 
-The proposal is to introduce a new keyword to the
-[user_attr(4)](https://illumos.org/man/user_attr) database, `auth_profiles`,
-which lists profiles that require authentication before they can be used.
+Introduce the additional concept of `Authenticated Profiles` which can be
+assigned to a user or a role. This is a list of profiles, which can only
+be used following additional authentication.
+
+A new `auth_profiles` keyword will be added to the
+[user\_attr(5)](https://illumos.org/man/user_attr) database.
 
     auth_profiles
         Contains an ordered, comma-separated list of profile names chosen from
-        prof_attr(4). The user must authenticate prior to using the rights
+        prof_attr(5). The user must authenticate prior to using the rights
         afforded by these profiles. This attribute takes precedence over
         profiles assigned using the profiles keyword
 
-        A list of auth_profiles can also be defined in the policy.conf(4) file.
+        A list of auth_profiles can also be defined in the policy.conf(5) file.
         Profiles assigned here will be granted to all users.
 
 ## Mechanism
@@ -40,53 +76,65 @@ The proposed mechanism is to extend the current in-kernel `pfexec`
 implementation. Today, when an exec() is encountered for a process which has
 the `PRIV_PFEXEC` flag set, the kernel performs an upcall to the pfexec daemon
 (`pfexecd`) which looks up the user and the command being executed in the
-user\_attr database and returns specific attribute overrides if appropriate;
-for example a different UID to use or additional privileges to add to the
-inherit set.
+[user\_attr(5)](https://illumos.org/man/user_attr) database and returns specific
+attribute overrides if appropriate; for example a different UID to use or
+additional privileges to add to the inherit set.
 
 For the authentication case, a new privilege flag will be introduced to record
 whether a process has successfully completed authentication. This new flag
 (`PRIV_PFEXEC_AUTH`) will be passed to `pfexecd` as part of the upcall. If the
 flag is set, then `pfexecd` will look at both the authenticated and
-unauthenticated profile set for the user, in that order, and return the
+unauthenticated profile sets for the user, in that order, and return the
 attribute overrides as necessary.
 
 If, however, the flag is **not** set, then the authenticated set will be
 inspected first and, if a match is found, a reply sent to the kernel
 indicating that authentication is required. In this case, the kernel will
 not execute the original command directly, but will instead invoke an
-_interpreter_ - `pfexec --auth`. This process will authenticate the user
-via pam(3pam). If authentication is successful, the `PRIV_PFEXEC_AUTH`
-flag will be set and the authentication helper will re-exec the original
-command.
+_interpreter_ - `pfauth`. This process will authenticate the user
+via [pam(3PAM)](https://illumos.org/man/3PAM/pam). If authentication is
+successful, the `PRIV_PFEXEC_AUTH` flag will be set and the authentication
+helper will re-exec the original command.
 
-       Userland                   |       Kernel
-       --------                   |       ------
+
+       Userspace                  |       Kernel
+       ---------                  |       ------
 
     +------------------------+    |
-    | pfexec                 |                        +------------------+
+    | pfexec                 |                        +---------<--------+
     |                        |    |                   |                  |
     |  setpflag(PRIV_PFEXEC) |                        |                  |
     |                        |        +---------------v-------------+    |
     |  call exec()           +--------> exec()                      |    |
-    +------------------------+        |                             |    |
-                                      |                             |    |
+    +------------------------+        |   |                         |    ^
+                                      |   |                         |    |
     +------------------------+        | call pfexecd                |    |
     | pfexecd                <--------+ (include auth status)       |    |
     |                        |        |                             |    |
     |   getexecuser()        +--------> pfexecd returns auth        |    |
-    +------------------------+        | required                    |    |
-                                      |                             |    |
-    +------------------------+        |                             |    |
-    | pfexec --auth          <--------+ exec(pfexec --auth) as      |    |
+    +------------------------+        | required(1)                 |   (2)
+                                      |   |                         |    |
+    +------------------------+        |   |                         |    |
+    | pfauth                 <--------+ exec(pfauth) as             |    |
     |                        |        | interpreter                 |    |
     |  authenticate (pam)    |        |                             |    |
     |  setpflag(PFEXEC_AUTH) |        |                             |    |
     |  exec(original cmd)    |        |                             |    |
-    +-----------------+------+        +-----------------------------+    |
+    +-----------------+------+        +-----------------------------+    ^
                       |                                                  |
                       |                                                  |
-                      +--------------------------------------------------+
+                      +----------->------------>------------>------------+
+
+1. pfexecd will also specify any additional privileges that should be
+   given to the `pfauth` helper in order that it can properly use PAM and
+   set the `PRIV_PFEXEC_AUTH` flag following successful authentication.
+   Since this is an increase in privileges, pfexecd will also tell the
+   kernel to scrub the process environment, as already happens when pfexec
+   changes owner or group.
+
+2. On this second pass through, pfexecd will see the authentication status
+   and include authenticated profiles when checking for additional
+   authorisations and exec attributes to assign.
 
 ## exec\_attr - libsecdb`getexecuser()
 
@@ -118,7 +166,7 @@ and whether that process has the new `PRIV_PFEXEC_AUTH` process flag.
 
 In many places the authorisation is checked from a server process which is not
 running as the user being checked. To support this, rather than modifying the
-existing `chkauthattr()` function, I propose to introduce a variant -
+existing `chkauthattr()` function signature, I propose to introduce a variant -
 `chkauthattr_ucred()` - which takes an additional argument by which the
 caller can provide a ucred which should be checked for the `PRIV_PFEXEC_AUTH`
 flag.
@@ -142,7 +190,7 @@ This will cause `pfexecd` to request authentication but fall back to the
 standard execution path once authenticated (or directly if granted via just
 `profiles`).
 
-A helper profile for `Service Management` could look like:
+A helper profile for `Service Management` would look like:
 
 ```
 % getent prof_attr Service\ Management\ (auth)
@@ -281,7 +329,7 @@ The `setpflags` system call will be updated to handle changing the new
 `PRIV_PFEXEC_AUTH` flag. Setting this flag will require the `PRIV_PROC_SETID`
 privilege.
 
-## proc(4) control PCSPRIV
+## proc(5) control PCSPRIV
 
 As per `setpflags`, setting the `PRIV_PFEXEC_AUTH` flag via this interface
 will also require the `PRIV_PROC_SETID` privilege.

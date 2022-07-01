@@ -1,6 +1,7 @@
 ---
 authors: Peter Tribble <peter.tribble@gmail.com>
-state: draft
+sponsors: Garrett D'Amore <garrett@damore.org>
+state: published
 ---
 
 # IPD 8 EOF NCA/NL7C
@@ -26,3 +27,10 @@ should be removed.
 
 Removing NCA from the path also simplifies the implementation of sockfs and
 sendfile.
+
+## Implementation Tickets
+
+Removing these bits is occurring in at least the following changes:
+
+- [14767 retire kssl](https://www.illumos.org/issues/14767)
+- [14768 retire nca](https://www.illumos.org/issues/14768)

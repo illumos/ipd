@@ -43,3 +43,18 @@ Kernel APIs related to cardbus -- the `csx_Put8()`, `csx_Get8()`, and similar
 functions (generally all starting with `csx_`) would be removed.
 These are currently not in a dedicated cardbus module, but part of the
 common kernel DDI.
+
+## Prior References
+
+This has been discussed before. Pure 16-bit PCMCIA support was
+removed around a decade ago, and back in 2014 a proposal to remove
+CardBus itself was floated, along with a review.
+This discussion was on the illumos mailing lists, in the following
+threads:
+
+* [obsolete legacy PCMIA](https://illumos.topicbox.com/groups/developer/Te2c90b02ebe5b0aa-M526606b14e4160e4e3231875/obsolete-legacy-pcmcia)
+
+* [proposed EOF of PCMCIA](https://illumos.topicbox.com/groups/developer/T3be2124e9f17aa04-Maa11cbaf947ea116077801cf/proposal-eof-pcmcia-bits)
+
+* [webrev for removing cardbus (2014)](https://illumos.topicbox.com/groups/developer/T5edf352487b49a3b-Mcf2cecc58cdd912926f8bd63/webrev-removal-of-cardbus)
+

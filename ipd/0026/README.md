@@ -44,7 +44,7 @@ functions (generally all starting with `csx_`) would be removed.
 These are currently not in a dedicated cardbus module, but part of the
 common kernel DDI.
 
-## Prior References
+## Prior Discussion
 
 This has been discussed before. Pure 16-bit PCMCIA support was
 removed around a decade ago, and back in 2014 a proposal to remove
@@ -58,3 +58,9 @@ threads:
 
 * [webrev for removing cardbus (2014)](https://illumos.topicbox.com/groups/developer/T5edf352487b49a3b-Mcf2cecc58cdd912926f8bd63/webrev-removal-of-cardbus)
 
+## Related Issues
+
+* [680 pm_create_components out to be cleaned up](https://www.illumos.org/issues/680)
+* [2398 pcs driver should be removed](https://www.illumos.org/issues/2398)
+* [5075 EOF cardbus & pcmcia](https://www.illumos.org/issues/5075)
+* [8510 pcmcia: typo in pcmcia_prop_op](https://www.illumos.org/issues/8510)

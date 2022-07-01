@@ -34,6 +34,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform](./ipd/0023/README.md)
 | predraft  | [IPD 24 Support for 64-bit ARM](./ipd/0024/README.md)
 | draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.md)
+| draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)
 
 ## Contributing
 

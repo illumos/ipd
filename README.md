@@ -35,6 +35,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 24 Support for 64-bit ARM](./ipd/0024/README.md)
 | draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.md)
 | draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)
+| draft     | [IPD 27 Sunset TNF](./ipd/0027/README.md)
 
 ## Contributing
 

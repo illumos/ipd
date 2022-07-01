@@ -95,11 +95,12 @@ fiction of an "`i86hvm` semi-platform".  A stub module that does nothing is
 delivered as `/platform/i86hvm/kernel/drv/amd64/cmdk` and it would appear we
 prefer modules in `/platform/i86hvm` to `/platform/i86pc` on Xen HVM.
 
-Another historical wart is that we do not appear to register `pci-ide` through
-`/etc/driver_aliases`, but rather through the obscure and outdated
+~~Another historical wart is that we do not appear to register `pci-ide`
+through `/etc/driver_aliases`, but rather through the obscure and outdated
 `/boot/solaris/devicedb/master` database.  This should likely be corrected
-first.  Then, we can either modify `pci-ide` to ignore Xen devices, or provide
-a HVM-specific stub device that will attach to a Xen-specific alias.
+first.~~  _[see issue 14628?]_ Then, we can either modify `pci-ide` to ignore
+Xen devices, or provide a HVM-specific stub device that will attach to a
+Xen-specific alias.
 
 In an AWS guest, we can see the PCI device has these aliases:
 
@@ -123,3 +124,7 @@ vendor.
 
 Other than `cmdk` stub shenanigans, the rest of the "semi-platform" can likely
 be collapsed into `i86pc` without further issues.
+
+## Related Tickets
+
+* [14628 ancient devicedb should be removed](https://www.illumos.org/issues/14628)

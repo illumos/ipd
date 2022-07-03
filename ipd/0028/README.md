@@ -65,9 +65,9 @@ been obsolete even before illumos was founded.)
 
    Note that the DLPI is still provided by the GLDv3 (mac) framework,
    for application use.  Applications may use the DLPI to access
-   low-level details.  These days such use is very rare, and mostly
-   limited to legacy consumers such as snoop.  This IPD does not
-   propose to change the support by GLDv3 for DLPI applications.
+   low-level details or for accessing raw link layer protocols.
+   This IPD does not propose to change the support by GLDv3 for DLPI
+   applications.
 
 4. GLDv2
 
@@ -172,8 +172,3 @@ Some of these have dependencies with each other, and some don't.
    Leaving behind defines to avoid reallocating numbers may
    be acceptable, but this should ideally be done in such a
    way to clean up the namespace pollution from such definitions.
-
-6. Document that the DLPI is Obsolete.
-
-   This involves updating both dlpi(7) and libdlpi(3lib).
-

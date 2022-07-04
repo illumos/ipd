@@ -30,9 +30,11 @@ been obsolete even before illumos was founded.)
    Token ring, aka IEEE 802.5, is a technology from the 1980s.
    In theory peak speeds of 100 Mbps were possible, but such
    devices were very rare, and users are more likely to have
-   experienced 16 Mbps in the early 1990s.  PCI cards for this
-   existed, but no driver for such hardware is known to have
-   exist for Solaris or illumos.
+   experienced 16 Mbps in the early 1990s. No driver for such
+   hardware exists for illumos (legacy SPARC drivers were closed
+   source) and we do not believe anyone has ever used token ring with
+   modern illumos or on Solaris x86, or in the past decade on SPARC
+   for that matter.
 
 2. FDDI
 
@@ -82,12 +84,21 @@ been obsolete even before illumos was founded.)
   widely available.  Note that GLDv3 is a completely different beast,
   and there is no code shared between GLDv2 or GLDv3.
 
+  It is generally fairly trivial to convert a GLDv2 to GLDv3 -- the
+  author of this IPD did numerous such conversions, including one that
+  was done in a half-day on a bet (Stephen Lau, I think you still owe
+  me something for that, but I don't remember what the stakes were!)
+
   In the Solaris 10 time frame, some open source developers
   (including the author!) wrote GLDv2 drivers, and there were a
-  few GLDv2 drivers in the core OS as well.  Since that time, all
-  such drivers have been converted to GLDv3.
+  few GLDv2 drivers in the core OS as well.
 
-  It is believed that there are no longer any users of the GLDv2.
+  In the illumos source code, the only remaining direct consumer of
+  GLDv2 is chxge. (The USB GEM module has code to support GLDv2, but
+  it is a compile time option, and it uses GLDv3 by default.)
+
+  Note that GLDv2 still sadly has aspects that are linked to STREAMs.
+  The GLDv3 hides all streams based APIs from the driver author.
 
 5. Softmac (partial)
 
@@ -142,33 +153,78 @@ Some of these have dependencies with each other, and some don't.
    This occurs mainly in the STREAMS utility functions, but also
    in the network layer.
   
-2. Retire GLDv2.
+2. Convert chxgbe to use GLDv3
 
-   There are no more consumers for it.
-   Removing it wil facilitate some of the other work, since
-   it won't have to be changed as individual bits are removed.
+   This step is necessary before GLDv2 can be eliminated.
+   Fortunately, the effort to perform such a conversion is generally
+   not very large, and in so doing, we may expose additional capabilities
+   to chxge (such as better support for multiple RX and TX rings)
+   to take advantage of in future work.
 
-3. Remove compatibility supoprt in the Softmac.
+3. Remove the #ifdef'd out for GLDv2 from usbgem.
+
+   Not strictly required, but a nice clean up.
+   This can happen immediately.
+
+4. Mark GLDv2 and DLPI *Provider* Sides Obsolete.
+
+   This means updating man pages and such to direct users towards
+   GLDv3.  This can happen immediately upon approval.
+
+5. Remove support for non-ethernet transports from GLDv2.
+
+   There are no such consumers.  This can happen *now*.
+   (GLDv2 retains code for FDDI, Token Ring, and Infiniband.
+   Infiniband is already moved over to GLDv3, and the other two
+   are already obsolete.  This can happen immediately upon approval.
+
+   While here, we should remove support for style 2 nodes from GLDv2.
+   There are exactly zero GLDv2 providers who need to export style 2 nodes.
+
+6. Remove support for Token Ring and FDDI in any other places
+
+   There is at least some special handling for TPR in softmac.
+   Probably in other places (snoop?) that can be cleaned up.
+
+7. Retire GLDv2.
+
+   Once there are no more consumers for it, we can remove it.
+   This may take some time, and we may need to figure out if there
+   are other providers in the system.
+
+8. Provide a modern TAP driver.
+
+   The current TAP driver used with OpenVPN is based on DLPI.
+   This could (and should!) be converted to a GLDv3 driver.
+   The driver masquerades as an Ethernet device.  We should
+   deliver this in-tree as well.
+
+9. Remove the legacy DLPI logic in softmac. 
+
+   This step can only happen once there are no more GLDv2 or
+   pure DLPI providers left to worry about.  In particular,
+   both chxgbe and tap will need to be addressed.  There may
+   be others.
+
+10. Remove DLPI conversion support in the Softmac.
  
-   This involves removing some special handling for Token Ring,
-   as well as the entirety of the conversion support for non-GLDv3
-   drivers.
-   What's left should be scrutinized further -- perhaps net_dacf
-   and the logic associated with setting up the vanity names can
-   just be moved into the GLDv3 proper, since there won't be any
-   other form of network driver.
-   This should only happen once GLDv2 is removed.
+   Most of softmac is a compatilibity shim to facilitate the
+   use of DLPI (and also GLDv2) by making them appear as GLDv3.
+   (There are some compromises made here, however.)  This code
+   can go, once we have no such drivers any more.
+   
+11. Move the vanity naming from softmac to GLDv3.
 
-4. Review remaining DLPI consumers -- if they have code implementing
-   handling for style 2 nodes, that should be removed, assuming that
-   style 1 is fully supported.
+  If we only have GLDv3 drivers, then GLDv3 can handle the part
+  of softmac that exists to support vanity names.  This will
+  simplify the logic, and allow us to remove net_dacf as well.
 
-   If possible, these applications should be moved onto a more
-   modern and mainstream socket interface.
+12. Consider eliminating support for style 2 DLPI PPAs.
 
-5. Remove any remaining vestiges of FDDI and/or Token Ring.
+  Some special providers (legacy tun/tap) behave as style 2
+  providers.  If those are converted to GLDv3, then there won't
+  be any further need for style 2.  Applications such as snoop that
+  have code to work with style providers can be cleaned up.
 
-   (There shouldn't be any.)
-   Leaving behind defines to avoid reallocating numbers may
-   be acceptable, but this should ideally be done in such a
-   way to clean up the namespace pollution from such definitions.
+  (Historical note: Originally some applications *only* had supoprt
+  for style 2, because legacy Sun SPARC drivers only supported style 2.)

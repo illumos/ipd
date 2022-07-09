@@ -38,6 +38,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | draft     | [IPD 27 Sunset TNF](./ipd/0027/README.md)
 | draft     | [IPD 28 EOF Legacy Network Driver interfaces](./ipd/0028/README.md)
 | draft     | [IPD 29 Sunset Sockets Direct Protocol](./ipd/0029/README.md)
+| draft     | [IPD 30 Remove obsolete SCSA functions](./ipd/0030/README.md)
 
 ## Contributing
 

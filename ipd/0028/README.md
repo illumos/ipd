@@ -228,3 +228,8 @@ Some of these have dependencies with each other, and some don't.
 
   (Historical note: Originally some applications *only* had supoprt
   for style 2, because legacy Sun SPARC drivers only supported style 2.)
+
+## References
+
+* [PSARC 2002/276 TCP Multi-Data Transmit](https://illumos.org/opensolaris/ARChive/PSARC/2002/276/)
+* [PSARC 2004/594 Multi-Data Transmit Extensions](https://illumos.org/opensolaris/ARChive/PSARC/2004/594/)

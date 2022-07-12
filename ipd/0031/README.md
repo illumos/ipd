@@ -4,7 +4,7 @@ sponsor:
 state: draft
 ---
 
-# Retire INTERFACE LEVEL category
+# Kernel Interace Stability Documentation
 
 ## Introduction
 
@@ -30,19 +30,42 @@ to facilitate porting drivers from another SVR4 to Solaris.
 This is not something that the author believes anyone has undertaken
 this millenium.
 
-Documenting the details here presents a burden on
-writers working with man pages, and adds useless content
-to every one our manual pages related to kernel content.
-There are are also technical errors and inconsistencies in
-this information.
+Conversely, Interface Stability as used in other sections
+(section 2 and 3 of the Reference Manual) is very useful, as
+it conveys details such as Committed or Obsolete, and may
+also convey additional clarifying information.
+
+Sometimes this information was presented in the INTERFACE LEVEL
+chapter, and sometimes it was in the Stability entry for the
+ATTRIBUTES table, and sometimes it wasn't presented at all.
+Ocassionally it was presented in both places.
 
 ## Description
 
-Remove the INTERFACE LEVEL chapter and references to illumos vs.
-generic DDI/DKI from all section 9, 9f, 9e, and 9s manual pages.
+We propose to fold the Interface Stability (Committed, Evolving, and Unstable.)
+and any clarifying text into the INTERFACE STABILITY chapter as has been done
+for other sections.
+This should utilize content from INTERFACE LEVEL or the ATTRIBUTES table
+when present.
 
-This can be done opportunistically as pages are edited, or
-done all at once.
+The actual INTERFACE LEVEL chapter should then be removed, as well as
+any references to illumos vs. "generic" DDI/DKI.
+(All of these interfaces are the illumos DDI.)
+
+The ATTRIBUTES table should be removed as well.
+In some cases an ARCHITECTURE field may be present.
+For those cases, that information should be placed into an
+ARCHITECTURE chapter as is done for other sections of the manual.
+
+Note that the INTERFACE STABILITY and ARCHITECTURE chapters are
+well documented by mdoc(4).
+
+## Implementation
+
+We should opportunistically fix manual pages.
+Alternatively, a single large change to update
+the manual all at once can be contemplated.
 
 Conceivably we could update mandoc so that linting man pages
 complains when it finds an INTERFACE LEVEL chapter.
+Perhaps this should also be done if an ATTRIBUTES chapter is found.

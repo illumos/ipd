@@ -20,6 +20,8 @@ but are dependent upon sdpib to provide any meaningful use.
 (In theory SDP could run over other transports besides IB, but that has
 never been implemented for illumos.)
 
+Finally there is also an administrative command, sdpadmin.8.
+
 Sockets Direct Protocol is also now deprecated (for about ten years or so).
 
 The author is unaware of any use of SDP in illumos.
@@ -31,7 +33,8 @@ it's reasonable that a future IPD might propose such.)
 ## Description
 
 We propose to simply remove the closed source sdpib strmod module, as well
-as the sdp and socksdp modules.
+as the sdp and socksdp modules.  Further, we would remove the sdpadmin(8)
+command (and associated documentation.)
 
 This potentially also will make it easier to clean up other
 interfaces that module may be using, at some future date.

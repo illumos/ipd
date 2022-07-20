@@ -84,6 +84,10 @@ be clarifications in man pages that list explicit architecture load
 paths. (THey can change to listing e.g. /kernel/drv/${KARCH}/driver
 instead of enumerating them for each architecture.)
 
+None of this has any effect on platform names (i86pc, i86hvm, or
+possible future platform implementation names.  Multiple platforms
+can share the same kernel architecture.)
+
 ## Future Directions
 
 It seems somewhat unlikley that we will ever need to support both

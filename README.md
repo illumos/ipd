@@ -42,6 +42,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | draft     | [IPD 31 Kernel interface stability documentation](./ipd/0031/README.md)
 | predraft  | [IPD 32 Introduce scsi_hba_pkt_mapin](./ipd/0032/README.md)
 | predraft  | [IPD 33 Obsolete legacy SCSI HBA API](./ipd/0033/README.md)
+| draft     | [IPD 34 Rationalize Kernel Architecture Module Paths](./ipd/0034/README.md)
 
 ## Contributing
 

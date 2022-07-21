@@ -12,7 +12,7 @@ This IPD proposes to end the notion of "special" or "privileged"
 kernel architectures, by including the kernel architecture (e.g.
 amd64, or in the future arm64 or whatever) in the kernel directory
 paths.  This matches the existing practice for 64-bit amd64, as
-well as for there recently removed sparcv9 architecture.  It would
+well as for the recently removed sparcv9 architecture.  It would
 prohibit another architecture (say arm) from following the old
 approach of 32-bit architectures not including the architecture
 name in the module path.
@@ -29,7 +29,7 @@ so that different platforms ("implementations")
 based on the same architecture could deliver different
 versions of modules.  For example, we used to have
 /platform/SUNW,Ultra-1 and /platform/SUNW,Ultra-450,
-eacho of which had subdirectories such as kernel, etc.
+each of which had subdirectories such as kernel, etc.
 
 At some point we added i386 as an architecture, with the
 single platform "i86pc".  In all other respects it followed

@@ -1,6 +1,6 @@
 ---
 author: Toomas Soome
-sponsor:
+sponsor: Garrett D'Amore
 state: draft
 ---
 

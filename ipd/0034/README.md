@@ -81,7 +81,7 @@ This approach should simplify packaging and documentation.
 Note that there are no changes needed to code to effect this change
 today.  The only things that should probably be fixed here would
 be clarifications in man pages that list explicit architecture load
-paths. (THey can change to listing e.g. /kernel/drv/${KARCH}/driver
+paths. (They can change to listing e.g. /kernel/drv/${KARCH}/driver
 instead of enumerating them for each architecture.)
 
 None of this has any effect on platform names (i86pc, i86hvm, or

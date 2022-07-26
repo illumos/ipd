@@ -1,7 +1,7 @@
 ---
 author: Garrett D'Amore
 sponsor:
-state: predraft
+state: draft
 ---
 
 # Introduce scsi_hba_pkt_mapin

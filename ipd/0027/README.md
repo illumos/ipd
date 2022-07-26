@@ -28,6 +28,20 @@ I have prepared the change:
 
 [link to gerrit review](https://code.illumos.org/c/illumos-gate/+/1707)
 
+## Conversion of Pre-Existing Probes
+
+Some probes, specifically in the scheduler, should probalby be converted to static DTrace probes.
+Specifically the following probes will be replaced with DTRACE_SCHED1() probes as follows:
+
+* schedctl_failsafe -- becomes schedctl__failsafe, taking kthread_t
+* swapin_lwp -- becomes swapin__lwp, taking kthread_t
+* swapout_lwp -- becomes swapout__lwp, taking kthread_t
+* swapout_process -- becomes swapout__process, taking proc_t
+
+There will be no effort to convert the remaining TNF probes.
+Most of them are in either the obsolescent IEEE1394 stack or the tavor Infiniband HCA.
+Many of them (most!) can easily be handled with just the DTrace FBT provider.
+
 ## Prior Discussion
 
 [illumos-developer](https://illumos.topicbox.com/groups/developer/T35ec4a1cf45f3206-Me7b3ac7e1ca6b0c8ac78b971/tnf)

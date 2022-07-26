@@ -1,7 +1,7 @@
 ---
 author: Toomas Soome
 sponsor: Garrett D'Amore
-state: draft
+state: published
 ---
 
 # Sunset TNF

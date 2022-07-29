@@ -1,9 +1,12 @@
 # illumos Project Discussion
 
-This repository is a preliminary holding area for a new shrink-to-fit process
-for collaboration on larger scale illumos projects.  This README itself will
-get fleshed out soon, but in the meantime there is a table of initial IPD
-(illumos project discussion) documents below:
+IPDs are a shrink-to-fit description of larger scale (in either code size or
+impact) project wishing to make changes to illumos.  They should describe the
+what and the why and give people the opportunity to comment on both.
+
+An IPD is at its heart, just a README.md in a numbered directory in this
+repository, existing IPDs are enumerated below for easy reference.  Further
+information is available at the end of this document.
 
 ## IPDs
 
@@ -47,6 +50,46 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 
 ## Contributing
 
-Contributions are welcome!  In the short term, you can reach out to
-[@jclulow](https://github.com/jclulow) or open an issue against this
-repository.
+Contributions are welcome.  A good rule of thumb as to whether you _should_
+have an IPD is whether you are making a change with high impact to other
+developers or users (introducing or removing a supported platform, doing
+something with non-obvious compatibility constraints), or engaging in a
+long-term project that will likely integrate in pieces, to provide the overall
+picture.
+
+For your first contribution, you might want to just submit a pull request to
+this repository.  Going forward if this is a thing that you will do again,
+we'll probably give you write access to this repository so you can just add
+your new IPDs as they come up.
+
+## Format
+
+An IPD has a short header block indicating authorship (that's you),
+sponsorship (we'll get to that), and state.
+
+### States
+
+#### predraft
+
+You've started writing your IPD and you want to share it narrowly, or even
+just to reserve your a number in this repository.  You're _predraft_, maybe
+you only have a title and a short paragraph right now, that's fine.
+
+#### draft
+
+You've finished writing and explaining, and now you're going to send your IPD
+to the [developer mailing list](mailto:developer@lists.illumos.org), this is a
+draft, you're going to receive feedback so it's not complete, but it's close.
+
+#### published
+
+One or more people from the [illumos core
+team](https://illumos.org/docs/about/leadership/) have agreed that what you've
+described is a good thing, and that we should do it.  Your IPD is done and
+published (though is not immutable! If you find more information would be
+useful later, please add it!)
+
+### Sponsorship
+
+"Sponsor" is a weird word here, it's just the person or people on the illumos
+core team who were ok with your IPD.  Don't worry about it.

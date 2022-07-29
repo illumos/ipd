@@ -35,7 +35,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 24 Support for 64-bit ARM](./ipd/0024/README.md)
 | draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.md)
 | draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)
-| draft     | [IPD 27 Sunset TNF](./ipd/0027/README.md)
+| published | [IPD 27 Sunset TNF](./ipd/0027/README.md)
 | draft     | [IPD 28 EOF Legacy Network Driver interfaces](./ipd/0028/README.md)
 | draft     | [IPD 29 Sunset Sockets Direct Protocol](./ipd/0029/README.md)
 | draft     | [IPD 30 Remove obsolete SCSA functions](./ipd/0030/README.md)

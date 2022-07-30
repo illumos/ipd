@@ -116,6 +116,6 @@ behind a symbolic link).
 
 ## Related Cases
 
-* [../0014/README.md](IPD 14 illumos and Y2038)
-* [../0019/README.md](IPD 19 Sunset SPARC)
-* [../0034/README.md](IPD 34 Rationalize Kernel Architecture Module Paths)
+* [IPD 14 illumos and Y2038](../0014/README.md)
+* [IPD 19 Sunset SPARC](../0019/README.md)
+* [IPD 34 Rationalize Kernel Architecture Module Paths](../0034/README.md)

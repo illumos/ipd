@@ -107,7 +107,7 @@ we therefore propose:
 
 ## Future Directions
 
-It may be desirable in the future to relegate 32-bit libraries to a ghetto, such as /usr/lib/i386.
+It may be desirable in the future to relegate 32-bit libraries to a separate directory for legacy libraries, such as `/usr/lib/i386`.
 This can be done without breaking binary compatibility if the loader is modified to explicitly search
 these paths when resolving symbols for a 32-bit binary.
 

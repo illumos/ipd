@@ -44,6 +44,7 @@ get fleshed out soon, but in the meantime there is a table of initial IPD
 | predraft  | [IPD 33 Obsolete legacy SCSI HBA API](./ipd/0033/README.md)
 | draft     | [IPD 34 Rationalize Kernel Architecture Module Paths](./ipd/0034/README.md)
 | draft     | [IPD 35 Sunset VTOC - SPARC](./ipd/0035/README.md)
+| draft     | [IPD 36 Rationalize $(MACH64) Command Paths](../ipd/0036/README.md)
 
 ## Contributing
 

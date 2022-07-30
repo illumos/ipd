@@ -15,7 +15,7 @@ search paths such as /usr/lib.
 It helps establish a set of guidelines leading to more
 comprehensive support for 64-bit architectures.
 
-It also proposes that no new 32-bit arechitectures will be
+It also proposes that no new 32-bit architectures will be
 introduced to illumos.
 
 ## Goals

@@ -1,6 +1,6 @@
 ---
 author: Garrett D'Amore
-sponsor:
+sponsor: Dan McDonald
 state: draft
 ---
 

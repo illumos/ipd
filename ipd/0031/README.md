@@ -1,7 +1,7 @@
 ---
 author: Garrett D'Amore
 sponsor: Dan McDonald
-state: draft
+state: published
 ---
 
 # Kernel Interace Stability Documentation

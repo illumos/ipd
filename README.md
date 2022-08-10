@@ -40,7 +40,7 @@ information is available at the end of this document.
 | draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)
 | published | [IPD 27 Sunset TNF](./ipd/0027/README.md)
 | draft     | [IPD 28 EOF Legacy Network Driver interfaces](./ipd/0028/README.md)
-| draft     | [IPD 29 Sunset Sockets Direct Protocol](./ipd/0029/README.md)
+| published | [IPD 29 Sunset Sockets Direct Protocol](./ipd/0029/README.md)
 | draft     | [IPD 30 Remove obsolete SCSA functions](./ipd/0030/README.md)
 | published | [IPD 31 Kernel interface stability documentation](./ipd/0031/README.md)
 | draft     | [IPD 32 Introduce scsi_hba_pkt_mapin](./ipd/0032/README.md)

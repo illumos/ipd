@@ -1,7 +1,6 @@
 ---
 author: Garrett D'Amore
-sponsor:
-state: draft
+state: Published
 ---
 
 # Sunset Sockets Direct Protocol

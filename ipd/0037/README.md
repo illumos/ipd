@@ -42,7 +42,7 @@ features and logs, etc.
 semantic commands come into play. For example, these cover basic things
 such as read, write, flush, dataset management (e.g. trim, unmap), etc.
 
-The way that this works out is that the one digit command code is broken
+The way that this works out is that the one byte command code is broken
 into a few ranges. There is a range reserved for well known use by the
 spec (e.g. 0x00-0x7f), a similar well know range for I/O command sets
 (e.g. 0x80-0xbf), and a specific set for vendor-specific commands, (e.g.

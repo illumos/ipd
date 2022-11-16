@@ -128,7 +128,13 @@ write output data from the device, etc.
 
 ### Listing Applicable Commands and Features
 
-An important 
+An important discoverability point is knowing what commands, features,
+and log pages are applicable. Right now, the only way to know which log
+pages you can actually get at is by looking at the manual page. When we
+extend support for these, we should make sure there's easy syntax
+whether through the help output, new top-level commands, or something
+else such that you can discover what you can run on these devices as
+part of using this at the CLI.
 
 ## High-level Implementation Notes
 

@@ -44,8 +44,8 @@ such as read, write, flush, dataset management (e.g. trim, unmap), etc.
 
 The way that this works out is that the one byte command code is broken
 into a few ranges. There is a range reserved for well known use by the
-spec (e.g. 0x00-0x7f), a similar well know range for I/O command sets
-(e.g. 0x80-0xbf), and a specific set for vendor-specific commands, (e.g.
+spec (i.e. 0x00-0x7f), a similar well know range for I/O command sets
+(i.e. 0x80-0xbf), and a specific set for vendor-specific commands, (i.e.
 0xc0-0xff).
 
 This pattern is not specific to just commands, but it is repeated for
@@ -61,8 +61,8 @@ vendor-specific log pages via the `NVME_IOC_GET_LOGPAGE` ioctl and to
 run arbitrary vendor-specific commands via the `NVME_IOC_PASSTHRU`
 ioctl. At Oxide, we developed and used both of these as part of looking
 at and understanding different aspects of devices which includes
-everything from running from PCIe signal integrity to more detailed logs
-around endurance, device activity, and related.
+everything from running PCIe signal integrity checks to more detailed
+logs around endurance, device activity, and related.
 
 The ioctls were built with the intention of being plumbed into nvmeadm
 so that way everyone can take advantage of this behavior and to make it
@@ -255,8 +255,8 @@ In the Identify Controller Data Structure, bytes 95:92 are called the
 'Optional Asynchronous Events Supported (OAES)'. The human readable
 name, while a bit long is that whole thing ignoring the part in parens.
 The short name is 'OAES'. A user may be interested in the value of this
-field or they may be interested in a particular bit. In this case, bis,
-8, 9, 11-14 all have specific disjoin meanings. Bit 9 says that the
+field or they may be interested in a particular bit. In this case, bits,
+8, 9, 11-14 all have specific disjoint meanings. Bit 9 says that the
 device supports the 'Firmware Activation Notices'. So someone might want
 to walk up and use `nvmeadm identify` to get at this single specific
 bit.

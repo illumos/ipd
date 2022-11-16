@@ -6,13 +6,13 @@ state: prediscussion
 # IPD 37 Vendor-specific Command, Log, and Feature Support in nvmeadm(8)
 
 Today, the [`nvmeadm(8)`](https://illumos.org/man/8/nvmeadm) tool
-provides is one of the many ways to understand and get information about
-NVMe devices in an illumos system. Of particular relevant to us here is
-its ability to obtain and process:
+provides the many ways to understand and get information about NVMe
+devices in an illumos system. Of particular relevance to us here is its
+ability to obtain and process:
 
 * Basic Controller and Namespace Information via `nvmeadm identify`
-* Obtain information about standard log pages via `nvmeadm get-logpage`
-* Obtain information about standard features via `nvmeadm get-features`
+* Information about standard log pages via `nvmeadm get-logpage`
+* Information about standard features via `nvmeadm get-features`
 
 Unfortunately, like in the SAS and (S)ATA worlds of the past, there are
 many vendor-specific and device-specific commands, log pages, and
@@ -58,11 +58,11 @@ the following data types:
 
 Today, the illumos nvme driver supports the ability to query
 vendor-specific log pages via the `NVME_IOC_GET_LOGPAGE` ioctl and to
-run arbitrary vendor-specific commands via the `NVME_IOC_PASSTHRU`. At
-Oxide, we developed and used both of these as part of looking at and
-understanding different aspects of devices which includes everything
-running from PCIe signal integrity to more detailed logs around
-endurance, device activity, and related.
+run arbitrary vendor-specific commands via the `NVME_IOC_PASSTHRU`
+ioctl. At Oxide, we developed and used both of these as part of looking
+at and understanding different aspects of devices which includes
+everything from running from PCIe signal integrity to more detailed logs
+around endurance, device activity, and related.
 
 The ioctls were built with the intention of being plumbed into nvmeadm
 so that way everyone can take advantage of this behavior and to make it
@@ -188,7 +188,7 @@ those for later processing. Specifically this would be something we want
 to add into:
 
 * `nvmeadm identify` (and its two variants)
-* `nvmeadm get-logagpe`
+* `nvmeadm get-logpage`
 * `nvmeadm get-features`
 
 This would likely require specific features to be listed with
@@ -198,19 +198,58 @@ also supports this same logic uses the `-w` command. `pcieadm` uses a
 distinct command. We propose for the time being to make this part of the
 default commands.
 
+As an example, you could imagine the following:
+
+```
+# nvmeadm identify-controller -w /tmp/nvme0.out
+# nvmeadm identify-controller -f /tmp/nvme0.out
+/tmp/nvme0.out: Identify Controller
+  Controller Capabilities and Features
+    Model:                                  HP SSD EX950 1TB
+    Serial:                                 HBSE40251300937
+    Firmware Revision:                      42A4SBMA
+    Multi-Interface Capabilities
+      Multiple PCI Express ports:           unsupported
+      Multiple Controller Support:          unsupported
+      Controller is an SR-IOV Virtual Function: unsupported
+      Asymmetric Namespace Access Reporting: unsupported
+    Maximum Data Transfer Size:             256kB
+    Unique Controller Identifier:           0x0001
+    NVMe Version:                           1.3
+    RTD3 Resume Latency:                    500000us
+    RTD3 Entry Latency:                     2000000us
+    Controller Type:                        not reported
+    FRU GUID:                               unsupported
+    Command Retry Delay Time 1:             unsupported
+    Command Retry Delay Time 2:             unsupported
+...
+```
+
+The goal here is that regardless of which of these commands you used,
+you'd be able to use all the processing flags regardless of which mode
+it came in on. There would be a little trickiness as some parts of these
+commands want different access to information that is gathered in the
+`nvme_process_arg_t`; however, that should be something that we can deal
+with generally.
+
+Unlike the PCI tools, we may end up wanting to create a small header
+that encodes a bit of additional information about the binary payloads
+we output, but whether that is necessary or not is something we'll let
+the implementation drive.
+
 ### Selecting Fields to Output
 
 The ability to explicitly select which fields and sub-fields you care
-about is very powerful. One of the challenges with nvemadm today is that
+about is very powerful. One of the challenges with nvmeadm today is that
 the field you care about may be hidden under the `-v` flag or it might
-not be. There is no good way to determine that other than by looking at
+not be. There is no easy way to determine that other than by looking at
 the source code and trying either one. There also isn't a good rule of
 thumb for when something should or shouldn't be verbose.
 
 In addition, it's worth noting that a lot of information in a log page
 or in the identify data structures, just like in PCI, is structured in a
-few levels of detail. In addition, the top-level values all of explicit
-short names. Let's look at an example:
+few levels of detail. In addition, the top-level values all have
+explicit short names. Let's look at an example:
 
 In the Identify Controller Data Structure, bytes 95:92 are called the
 'Optional Asynchronous Events Supported (OAES)'. The human readable
@@ -221,6 +260,31 @@ field or they may be interested in a particular bit. In this case, bis,
 device supports the 'Firmware Activation Notices'. So someone might want
 to walk up and use `nvmeadm identify` to get at this single specific
 bit.
+
+So here's a few examples of what we logically want to be able to do:
+
+```
+# nvmeadm identify-controller -f ctrl.oaes nvme0
+nvme0: Identify Controller
+  Controller Capabilities and Features
+    Optional Asynchronous Events Supported
+      Namespace Attribute Notices:          unsupported
+      Firmware Activation Notices:          supported
+      Asynchronous Namespace Access Change Notices: unsupported
+      Predictable Latency Event Aggregation: unsupported
+      LBA Status Information Notices:       unsupported
+      Endurance Group Event Aggregate Log Page Change Notices: unsupported
+# nvmeadm identify-controller -f ctrl.serial,nvmcmd.nn,psd.0.mp nvme0
+nvme0: Identify Controller
+  Controller Capabilities and Features
+    Serial:                                 HBSE40251300937
+  NVM Command Set Attributes
+    Number of Namespaces:                   1
+  Power State Descriptors
+    Power State Descriptor 0
+      Maximum Power:                        9W
+
+```
 
 I'd like to propose that we add the ability to require a specific set of
 hierarchical output from the identify, log page, and feature information
@@ -241,6 +305,42 @@ do:
 * Make it easy to list all the applicable fields and short names
 * No longer use the `-v` flag to control what does and doesn't cause
 visibility
+
+One way to make it easy to show short names is to include an option to
+always include it. So if we take the above examples and applied a flag
+to print them (pcieadm uses `-n`) you'd see something like:
+
+```
+# nvmeadm identify-controller -f ctrl.serial,nvmcmd.nn,psd.0.mp nvme0
+nvme0: Identify Controller
+  Controller Capabilities and Features (ctrl)
+    Serial (ctrl.serial):                   HBSE40251300937
+  NVM Command Set Attributes (nvmcmd)
+    Number of Namespaces (nvmcmd.nn)        1
+  Power State Descriptors (psd)
+    Power State Descriptor 0 (psd.0)
+      Maximum Power (psd.0.mp)              9W
+```
+
+When it comes to just list fields, here this could look like wha we're
+doing with pcieadm. Here's an example of its filter `-L` output which
+just walks the data structures and prints the field names, ignoring the
+values:
+
+```
+rm@atrium ~ $ pfexec /usr/lib/pci/pcieadm show-cfgspace -L -d nvme0 msix
+SHORT                         HUMAN
+msix.ctrl                     Control Register
+msix.ctrl.size                Table Size
+msix.ctrl.mask                Function Mask
+msix.ctrl.enable              MSI-X Enable
+msix.table                    Table Offset
+msix.table.bir                Table BIR
+msix.table.offset             Table Offset
+msix.pba                      PBA Offset
+msix.pba.bir                  PBA BIR
+msix.pba.offset               PBA Offset
+```
 
 ### Including the Raw Value in Output
 
@@ -281,7 +381,7 @@ would be a boon:
 
 * The short name of a field
 * The human name of a field
-* It's value
+* Its value
 
 ## Summary of Changes
 
@@ -297,4 +397,5 @@ reading from a file
 
 After this has been done, a second phase would be to incrementally
 extend the existing log page, controller identify, and related output
-processing based on the experience in the first. The exact break down 
+processing based on the experience in the first. The exact split will be
+based on the what we determine from the actual work that's done.

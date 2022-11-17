@@ -1,6 +1,6 @@
 ---
 author: Robert Mustacchi <rm@fingolfin.org>
-state: prediscussion
+state: draft
 ---
 
 # IPD 37 Vendor-specific Command, Log, and Feature Support in nvmeadm(8)

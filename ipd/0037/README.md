@@ -160,6 +160,30 @@ here. It is then up to the backend to determine which of the commands
 apply to a given device. This would be done based upon the PCI ID
 information generally speaking.
 
+It's worth calling out and explaining why we want to use the PCI IDs as
+a starting point. In general, an NVMe device will identify itself in two
+different ways:
+
+1. Through the standard vendor, device, subsystem, and revision IDs in
+configuration space.
+2. Through the NVMe Identify Controller command, which includes the PCI
+vendor ID, a model string, and a serial number.
+
+It's worth noting that most datasheets use a single device ID for a
+given generation of controllers and firmware; however, the actual model
+string will vary wildly within a given line as many model strings are
+actually the vendor name and part number concatenated. That part number
+space changes based on not just the capacity and endurance of the
+device, but also the form factor, security features, and however else
+the vendor opts to differentiate the device.
+
+Most datasheets don't include or list all the models. This leads us to a
+slight preference for using the PCI configuration space information as
+it will be more regular. We may still end up needing the Identify
+Controller data structure because something such as the firmware
+revision may come into hand, but we'll cross that bridge when we get
+there.
+
 Throughout the course of implementing this, we probably would come up
 with strategies to make the amount of logic each backend needs to be
 reduced and shared with a common implementation, but any such interfaces

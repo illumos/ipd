@@ -1,5 +1,6 @@
 ---
 author: Robert Mustacchi <rm@fingolfin.org>
+sponsors: Patrick Mooney <pmooney@pfmooney.com>
 state: draft
 ---
 

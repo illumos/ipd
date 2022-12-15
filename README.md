@@ -48,7 +48,7 @@ information is available at the end of this document.
 | draft     | [IPD 34 Rationalize Kernel Architecture Module Paths](./ipd/0034/README.md)
 | draft     | [IPD 35 Sunset VTOC - SPARC](./ipd/0035/README.md)
 | draft     | [IPD 36 Rationalize $(MACH64) Command Paths](./ipd/0036/README.md)
-| draft     | [IPD 37 Vendor-specific Command, Log, and Feature Support in nvmeadm(8)](./ipd/0037/README.md)
+| published | [IPD 37 Vendor-specific Command, Log, and Feature Support in nvmeadm(8)](./ipd/0037/README.md)
 
 ## Contributing
 

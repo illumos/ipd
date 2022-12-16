@@ -1,0 +1,337 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+
+= IPD 38 Signal Handling, Extended FPU State, ucontexts, x86, and You
+{authors}
+
+As of this writing, illumos does not properly preserve the extended x86
+register state as part of signal handling. This issue is documented in
+[15254 %ymm registers not restored after signal
+handler](https://www.illumos.org/issues/15254). The main goals of this
+IPD are:
+
+* To explain the challenges that we're facing and give appropriate
+  context.
+* To explain improvements to observability and the steps to fix this
+  particular problem.
+* Discuss forthcoming features on x86 that make this more challenging
+  and how that changes are approach.
+* Provide guidance for what should be done on future ports and other
+  systems.
+
+== Background
+
+To fully understand what's going on, it's worth understanding several
+different pieces and mechanisms that exist in the system that are all
+inter-related.
+
+=== x86 FPU and its Endless Extensions
+
+The x86 FPU and its state has a long and sordid history from its life as
+a co-processor in the form of the Intel 80387 to its current state of
+being a rather large vector processing unit. This is even being extended
+by the addition of a full Matrix Processing extensions.
+
+There have been multiple different ways to save and restore the state in
+the FPU. Iniitally there was the `fsave`/`fnsave` instruction which
+stored it in one format and handled the 80-bit FPU state. This was used
+for a while and became part of the i386 System V ABI (more on that
+later). The structure for this is the the
+https://github.com/illumos/illumos-gate/blob/7b5987898994d86cd20e00dbf8c305dfbfbb8bea/usr/src/uts/intel/sys/fp.h#L178-L194[`struct
+fnsave_state`] which looks like:
+
+----
+struct fnsave_state {
+	uint16_t	f_fcw;
+	uint16_t	__f_ign0;
+	uint16_t	f_fsw;
+	uint16_t	__f_ign1;
+	uint16_t	f_ftw;
+	uint16_t	__f_ign2;
+	uint32_t	f_eip;
+	uint16_t	f_cs;
+	uint16_t	f_fop;
+	uint32_t	f_dp;
+	uint16_t	f_ds;
+	uint16_t	__f_ign3;
+	union {
+		uint16_t fpr_16[5];	/* 80-bits of x87 state */
+	} f_st[8];
+};	/* 108 bytes */
+----
+
+Eventually, the FPU hit a series of extensions for both the MMX and XMM
+instructions. This resulted in a new structure and a new series of
+instructions. 8 128-bit registers were added that were called `%xmm0`
+to `%xmm7`. This resulted in a new structure to save and restore the
+state that covered both the traditional x87 FPU state from fnsave and
+the new state with the `fxsave` instruction. This produced the [`struct
+fxsave_state`](https://github.com/illumos/illumos-gate/blob/7b5987898994d86cd20e00dbf8c305dfbfbb8bea/usr/src/uts/intel/sys/fp.h#L201-L231).
+This looks like:
+
+----
+struct fxsave_state {
+	uint16_t	fx_fcw;
+	uint16_t	fx_fsw;
+	uint16_t	fx_fctw;	/* compressed tag word */
+	uint16_t	fx_fop;
+#if defined(__amd64)
+	uint64_t	fx_rip;
+	uint64_t	fx_rdp;
+#else
+	uint32_t	fx_eip;
+	uint16_t	fx_cs;
+	uint16_t	__fx_ign0;
+	uint32_t	fx_dp;
+	uint16_t	fx_ds;
+	uint16_t	__fx_ign1;
+#endif
+	uint32_t	fx_mxcsr;
+	uint32_t	fx_mxcsr_mask;
+	union {
+		uint16_t fpr_16[5];	/* 80-bits of x87 state */
+		u_longlong_t fpr_mmx;	/* 64-bit mmx register */
+		uint32_t __fpr_pad[4];	/* (pad out to 128-bits) */
+	} fx_st[8];
+#if defined(__amd64)
+	upad128_t	fx_xmm[16];	/* 128-bit registers */
+	upad128_t	__fx_ign2[6];
+#else
+	upad128_t	fx_xmm[8];	/* 128-bit registers */
+	upad128_t	__fx_ign2[14];
+#endif
+} __aligned(16);	/* 512 bytes */
+----
+
+Importantly from the above definition you can see that it was changed in
+amd64. The most notable change was the increase from 8 to 16 xmm
+registers. AMD declared that part of the baseline for the amd64 ABI and
+was used for a while.
+
+==== Enter AVX and xsave
+
+In Intel's Sandy Bridge based systems Intel started on a trend of
+growing the FPU state. The 16 128-bit xmm registers became 16 256-bit
+registers. You can guess where this is going by this point: Intel needed
+a new save and restore mechanism again. This was introduced with the
+`xsave` instruction. However, rather than make the structure a fixed
+size, they actually did a bunch of additional work and created something
+that has had the flexibility to actually withstand several generational
+changes.
+
+The xsave save area begins with the `fxsave_state`. It is then followed
+by an xsave-specific header. The xsave header is followed by two 64-bit
+bitfields. The first 64-bit bitfield is used to indicate which
+subsequent structures are present and valid. Each structure begins at a
+fixed offset. Those fixed offsets are described by CPUID. Effectively
+what happens is that each state component in CPUID tells us what offset
+it begins at and where it is found.
+
+An important thing to realize is that these offsets **do** vary between
+vendors and systems. For example if we look at a Sylake System that
+supports AVX-512 and an AMD Genoa system that supports AVX-512, here are
+the offsets of different features that we have in the kernel:
+
+.Comparison of xsave offsets
+[opts="header",cols=3]
+|===
+| Feature | AMD | Intel
+| AVX | 0x240 | 0x240
+| AVX-512 OpMask | 0x340 | 0x440
+| AVX-512 Hi256 | 0x380 | 0x480
+| AVX-512 Hi16 | 0x580 | 0x680
+|===
+
+The important thing is that these offsets are basically only known at
+run-time, but once the CPU is started, they shouldn't change. This has
+important implications for the observability design that we'll come back
+to later.
+
+While there are many possible features in the processor, the OS may only
+have done enabling support for them. As such, there is a register called
+`xcr0`, which is the extended control register. This is read and written
+to with the `xgetbv` and `xsetbv` instructions, the latter of which is
+restricted to CPL 0 (e.g. the kernel). This is used to constrain what
+`xsave` and `xrstor` will perform. In particular, things are only saved
+and restored if they're enabled in xcr0 and in the corresponding
+instruction masks / valid state bits. This makes it so that even if a
+user sets additional bits into an xsave state, they won't be saved or
+restored unless they're something that is known.
+
+With the introduction of xsave, the OS moved to using it for saving and
+restoring the FPU state on context switch; however, we did not update
+anything in the signal handling or /proc paths to account for this in
+the various ABIs (again more ahead).
+
+==== Supervisor vs. User and State Explosion
+
+Since AVX was added several more bits have been defined here. These bits
+cover a wide variety of use cases and notably a split has been
+introduced. Originally there were only states that were meant to be used
+in all privilege levels such as AVX or the MPX bound registers so
+`xsave` operated just fine in all privilege levels.
+
+In particular, Intel added supervisor-only states that relate to things
+such as the Processor Trace, Hardware P-States, and more. Instead of
+setting things in `xcr0` there is a `IA32_XSS` MSR that is used to
+control these settings in a similar way. The system then has to execute
+the `xsaves` instruction to get the supervisor states into the xsave
+structure. The `xsaves` instruction will also look at the user
+components in `xcr0`, making it a single stop shop for the kernel with
+the wrinkle of using a compressed form factor we'll mention in a bit.
+
+With the addition of all these components into the xsave state, there
+were several different things that have happened. There was the
+introduction of an `xsaveopt` instruction that tried to save user state
+in an optimized way using processor tracking. It sometimes makes sense
+to use, but we can't always use it (e.g. in rtld). The second thing that
+was done was the addition of a compressed form.
+
+The way that the compressed form work is that the normal fxsave data is
+still there, followed by the bitfields that describe what is present. A
+particular bit is used in the second uint64 bitfield that the structure
+is compressed. At that point, rather than use the cpuid defined fixed
+offsets in the structure, each bit that is present in the feature set
+has its data placed contiguously. So if the xsave structure had say only
+one bit marked present in the bitfield, even if its normal cpuid offset
+would suggest it be at much further part in the structure, it'll be
+placed first.
+
+The compressed form uses the `xsavec` instruction to save the resulting
+state. To restore state, the normal `xrstor` instruction can be used,
+but it has slightly different behavior. The supervisor state has to be
+restored with the `xrstors` instruction and more confusingly, the
+supervisor state can only use the **compressed** form.
+
+This difference is important to note as it leads to some trickiness that
+we need to consider. illumos does not make use of the supervisor state
+at this point in time; however, the supervisor state makes an
+interesting wrinkle that needs to be considered: the normal flush of the
+FPU today only really considers that it contains user state and we'll
+need to make sure that when we're going to and fro that we're not
+potentially clobbering supervisor state.
+
+===== Comparing the xsave variants
+
+Given all of the above, it's worth summarizing the variants. They all
+have slightly different behaviors and keeping them straight are
+confusing. Whenever we're saving and restoring there is something that
+Intel calls the 'requested-feature bitmap' or RFBM. This is specified in
+registers and basically acts as yet another filter in terms of what is
+saved and restored. A bit has to be both in that, `xcr0` or `IA32_XSS`,
+and when restoring, the actual structure. The following table attempts
+to summarize high-level differences.
+
+.Comparison of xsave familiy instructions
+[opts="header",cols=4]
+|===
+| Instr | Compressed | Supervisor | Optimizations
+| `xsave` | No | No | init
+| `xsaveopt` | No | No | init, modified
+| `xsavec` | **Yes** | No | init-mxcsr
+| `xsaves` | **Yes** | **Yes** | init-mxcsr, modified
+|===
+
+Let's take these apart. What the init optimization basically says is
+that if a given component is in what it defines as the default state,
+then these things will no bother writing them out and will not set the
+bit in the xsave header indicating its presence.
+
+With the xsavec/xsaves style the init modification changes a bit.
+Basically there is a bit of a semantic thing they tried to fix, but it's
+a bit confusing. In particular, if someone has set the MXCSR value to
+something other than 0x1f80, then it will dump the XMM state if we
+requested it in the RFBM.
+
+The modified extension is a little more spicy. What ends up happening is
+that the processor begins tracking when state has been modified relative
+to the last restore of data; however, it also tracks a bunch of
+information about where that save occurred which includes the address of
+the state, privilege level, whether you're in a vmx non-root context,
+etc. Ultimately, what these are all trying to do is to make sure that if
+you're saving / restoring into similar places (like say lwp's pcb) that
+you don't have to do everything if nothing's changed. Now the flip side
+of that, is that it means that if you change what's inside that state
+without a subsequent restore or something else to invalidate this, then
+you likely are going to break the modified optimization, at least
+reading between the lines.
+
+Let's now turn our attention to the restore instructions. There are
+three primary cases that we want o consider. The first is what happens
+to the fpu state in the processor if the state bit isn't in the RFBM.
+Next, we ask ourselves what happens if bit is set in the RFBM and not in
+the xsave state and then what happens if it's set for both.
+
+The other thing we need to consider is which bitfields do they use. When
+a compressed save is used, the xstate_bv fields are set, but the
+compressed form appears to also use the xcomp_bv member bits to indicate
+presence. First let's discuss normal, uncompressed `xrstor` which has
+the following properties:
+
+* Logically RFBM does a binary-AND with xcr0 to determine the effective
+  RFBM.
+* If RFBM[i] is zero, the component is ignored.
+* If RFBM[i] is one, but xstate_bv[i] is 0, the initial state of the
+  unit is set.
+* If RFBM[i] is one and xstate_bv[i] is 1, then the state in the xsave
+  structure is set in the processor.
+
+When `xrstor` operates on a compressed form, its behavior changes
+slightly. While compressed information is written into xcomp_bv, it
+still uses xstate_bv mostly because it is an error for a bit to be set
+in xstate_bv, but not xcomp_bv. In particular, here's what's different:
+
+* If a bit is not in xstate_comp, it will not be restored. This is in
+  addition to requiring the bit to be set in xstate_bv[i].
+* If RFBM[1] is set and xstate_bv[1] is 0, the MXCSR is set to 0x1f80.
+  Normal `xrstor` apparently always sets the MXCSR from the xsave area
+  if either RFBM[1] or RFBM[2] are set.
+
+`xrstors` is similar to the compressed form of `xrstor`. In fact, it is
+an error to restore an uncompressed format. The following differences
+from the compressed form of `xrstor` exist:
+
+* Valid bits to update are taken from both `xcr0` and `IA32_XSS`.
+* If illegal values are set in any supervisor state component or the
+  MXCSR value, then it will cause a `#gp`.
+
+As we go forward into the discussion of what to do in the kernel, keep
+the following in mind, as the fact that `xsaves` and `xrstors` only
+operate on the compressed form is important.
+
+==== Enter the Matrix
+
+All of this seemed fine, but Intel has been adding a series of
+instructions titled 'Advanced Matrix Extensions' (AMX) which are coming
+in Sapphire Rapids. The notable thing is that this adds a 2D register
+set called a tile which are used for tile-based matrix multiplication.
+The initial register file is actually quite big! The new xsave state
+component bit 18 is called `XTILEDATA` and is 8 KiB because it's 8 tiles
+of 16 rows of 64-bytes each.
+
+Now, recall that with eager FPU which whether it's a good idea or not
+was required to work around speculative execution issues, requires that
+the entire FPU state is saved and restored around each context switch.
+So this is adding a large 8 KiB area to the xsave area, which most folks
+probably don't want to pay the cost for as it means folks have to
+actually set aside an additional 8 KiB of save area per process.
+
+To deal with that, Intel appears to have added a new MSR entitled
+`IA32_XFD` which stands for an extended feature disable. This
+effectively introduces a new lazy FPU where a `#nm` is generated and
+another new MSR, `IA32_XF_ERR_MSR` can be used to determine which state
+components were at fault. In Intel's initial version in Sapphire Rapids
+the docs suggest that only the XTILEDATA will cause this to happen. The
+docs also make a bunch of exceptions for what will generate a `#nm`. For
+example, many `xsave` and `xrstor` family instructions will not cause
+this to change.
+
+While we don't support AMX today, it's worth understanding what this
+means and we'll go into that into a bit more detail when we discuss the
+solution space. The important take away is that the amount of register
+space this covers is only growing.

@@ -24,6 +24,10 @@ IPD are:
 * Provide guidance for what should be done on future ports and other
   systems.
 
+== Summary of Proposed Changes
+
+XXX
+
 == Background
 
 To fully understand what's going on, it's worth understanding several
@@ -133,7 +137,7 @@ what happens is that each state component in CPUID tells us what offset
 it begins at and where it is found.
 
 An important thing to realize is that these offsets **do** vary between
-vendors and systems. For example if we look at a Sylake System that
+vendors and systems. For example if we look at a Skylake System that
 supports AVX-512 and an AMD Genoa system that supports AVX-512, here are
 the offsets of different features that we have in the kernel:
 
@@ -227,7 +231,7 @@ saved and restored. A bit has to be both in that, `xcr0` or `IA32_XSS`,
 and when restoring, the actual structure. The following table attempts
 to summarize high-level differences.
 
-.Comparison of xsave familiy instructions
+.Comparison of xsave family instructions
 [opts="header",cols=4]
 |===
 | Instr | Compressed | Supervisor | Optimizations
@@ -263,7 +267,7 @@ reading between the lines.
 
 Let's now turn our attention to the restore instructions. There are
 three primary cases that we want o consider. The first is what happens
-to the fpu state in the processor if the state bit isn't in the RFBM.
+to the FPU state in the processor if the state bit isn't in the RFBM.
 Next, we ask ourselves what happens if bit is set in the RFBM and not in
 the xsave state and then what happens if it's set for both.
 
@@ -431,7 +435,7 @@ struct  ucontext {
 
 Note, that while the `uc_filler` currently has a comment in the source
 code that suggests seeing the ABI spec, this filler has not been used.
-This is an important thing! Let's briely discuss this structure. The
+This is an important thing! Let's briefly discuss this structure. The
 `uc_flags` member is used to indicate which other members are actually
 valid and should be honored. There are flags that cover the signal mask,
 the stack, CPU state, and FPU.
@@ -493,7 +497,7 @@ Signal handling is a joint cooperation between libc and the kernel.
 Let's first go into what the kernel does when a signal is to be
 delivered:
 
-. The kernel looks at the singal's mask and disposition. If the signal
+. The kernel looks at the signal's mask and disposition. If the signal
 is masked, nothing really happens. If the signal's disposition is to
 ignore it or to kill the process, then both of those things happen.
 Let's assume we're delivering a signal.
@@ -625,3 +629,477 @@ Effectively, for every LWP we will write out a note with the contents of
 the corresponding `prgregset_t`, `prfpregset_t`, and the `prxregset_t`.
 Right now x86 doesn't have an `xregset` file or definition, so nothing
 is written out there.
+
+==== libc_db
+
+The https://illumos.org/man/3LIB/libc_db[libc_db(3LIB)] library is mean
+to provide a means of additional ways of getting access to additional
+information about threads, their registers, and related. In many ways
+this is a library that was born ahead of libproc. This library and the
+corresponding
+https://illumos.org/man/3PROC/proc_service[proc_service(3PROC)]
+interfaces have the ability and expectation to read and write registers.
+We call these out here as if we are improving observability we need to
+make sure that this is part of this.
+
+== Problem Summary
+
+Before we go into a survey of what others have done, given the above
+background, let's summarize what we are actually trying to solve and our
+constraints on the solution space. First our problems:
+
+. We need to properly save and restore the FPU xsave state across the
+signal handler.
+* As part of this we need to set clear expectations about what state is
+  saved and restored across calls to `getcontxt()` and `siglongjmp()`.
+* We also need to assume that folks want the ability to modify the xsave
+  state in the signal handler, regardless of our views on the merits of
+  that.
+. We need to improve the observability of the xsave state both for
+debuggers and core files. Specifically this includes:
+* Updating /proc to have files for this.
+* Updating libproc and mdb to get access to this state.
+* Updating the suite of surrounding tools and documentation.
+. We need to improve the way that signal stack sizing is performed for
+applications to avoid issues for AVX-512 which is increasing prominence
+with Zen 4 and get ahead of what might happen with AMX.
+
+We have the following constraints that we need to honor:
+
+* We must not violate the existing ABI contract of the `ucontext_t` and
+  `mcontext_t`.
+* We must assume that certain applications will assume that they have
+  access to all AVX state, including AVX-512, regardless of the size of
+  their stacks.
+
+The following are explicit non-goals of this work:
+
+* Enable support for Intel AMX.
+* Change the kernel to take advantage of the compressed save format and
+  supervisor states.
+* Enhance rtld to leverage the compressed save format.
+
+=== System Survey
+
+As part of working on this we have gone through and surveyed several
+other system to try and answer the following questions:
+
+* Do they save the entire xsave state in a signal handler?
+** If so, what format does that leverage? The compressed or the
+uncompressed?
+* Does `getcontext()` save xsave state at all?
+* What, if any, /proc style interfaces to these registers exist?
+
+[cols=6,options="header"]
+|===
+| Question
+| https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=77856d911a8c8724ee8e2b09d55979fc1de8f1c0[Linux]
+| https://github.com/freebsd/freebsd-src/tree/aba921bd9e1869dae9ae4cc6e0c048f997401034[FreeBSD]
+| https://github.com/NetBSD/src/tree/9ebc005c7122f6014596209d153a73cf72895112[NetBSD]
+| https://github.com/openbsd/src/tree/0cffdb45a9bb573ce4665f5540d1a0d50ff2e37f[OpenBSD]
+| Solaris 11.4
+| xsave in signal hander | Yes | Yes | No | Yes | Yes
+| Compressed in ucontext_t | No | No | N/A | No | Yes, but no*
+| Kernel uses xsaves | Conditionally | No | No | No | Unknown
+| getcontext xsave | Appears no in glibc, not present in musl | No | No | getcontext() was removed | No
+| Register access
+| Full xsave state via ptrace | Full xsave state via ptrace | Full xsave via ptrace and /proc
+| fxsave state only?  | Uses own data format via /proc
+| `MINSIGSTKSZ` | 2 KiB (musl, glibc), affected by kernel aux vector | 2 KiB | 8 KiB | 3 pages | ???
+| `SIGSTKSZ` value | 8 KiB (musl, glibc) | 36 KiB | 40 KiB  | 7 pages | ???
+|===
+
+There are a few different and useful takeaways from the above. Here are
+the highlights as we see them:
+
+* It is expected (no surprise) that xsave state should be saved in the
+  signal handler and accessed via pointers in the ucontext_t.
+* Pretty much all implementations that still have `getcontext()` do not
+  try to handle xsave state in it and just use the traditional ABI
+  registers, if anything. This is good news for us.
+* Aside from Solaris, the main way to access state is via a full xsave
+  state, which is not compressed. In the case of Linux, this is mostly
+  because that was the original user ABI, even though the kernel is now
+  using the compressed form factor in many cases.
+* In general, the actual default and minimum signal stack sizes do vary
+  a bit more widely than expected. This does give us a bit more
+  flexibility than we might expect.
+
+You'll note that we described Solaris as not quite using the compressed
+form factor. What they've done is to cause the xregset structure to have
+every state item that they currently support at fixed locations;
+however, they do not necessarily follow from the CPU's actual defined
+offsets. Thus this is not quite the xsave compressed format but neither
+is it strictly something that can be directly tossed into the xsave
+format.
+
+== Solution Sketch
+
+This section sketches out how we propose fixing and extending various
+pieces here.
+
+=== Signal Handling, ucontext, and getcontext(2)
+
+Fundamentally we need to save and restore the extended register state in
+the signal handler, while accounting for the fact that it may have been
+changed partially in user land.
+
+We start by using a new flag in the `ucontext_t` `uc_flags` member,
+which we call `UC_XSAVE`. In particular, this is not the same as what
+Solaris has done, hence why we don't want to use the exact same name.
+Let's call out a few important items here:
+
+* When both `UC_XSAVE` and `UC_FPU` are specified, then when restoring,
+  the ``fpregset_t``'s version of the legacy save area will override
+  whatever is in the `UC_XSAVE` area. This preserves existing semantics
+  in the ABI. If `UC_FPU` is not set, then it will not change anything.
+
+* While other signal handling contents are generally considered public,
+  as we are introducing this and we know no applications can modify this
+  state, we would like to make this **private** to start with. This will
+  allow us to consider evaluating using the compressed form here,
+  minimizing the likelihood of signal handler impact.
+
+* The `getcontext(2)` system call will not fill in or set `UC_XSAVE`.
+
+* If bad data has been placed in `UC_XSAVE`, we will consider that fatal
+  and depending on the specifics of the implementation, consider killing
+  the process.
+
+With these constraints in mind, the question that we have is what is the
+right form for actually writing and reading the data in the signal
+handler. In an ideal world, we would consider reusing the `prxregset_t`
+structure that we discuss below. If we were going to support
+applications modifying this data, then we would say that it makes the
+most sense to use only one. However, the tradeoff with what is proposed
+below is basically space. If AVX-512 is supported (in the first case and
+irregardless in the second proposal), then we will already overflow the
+minimum signal stack size. While we have subsequent proposals for this,
+it does cause us to pause and ask what makes the most sense.
+
+This ipd does not constrain what the implementation will be and we allow
+that to be determined based on the experience implementing the various
+pieces and understanding what they look like with a weak bias towards
+the `prxregset_t` if we can manage to make that fit. Regardless of our
+choice, it will be treated and documented as private.
+
+=== /proc and xregs
+
+One of the principle things that makes the current situation harder is
+the lack of observability of this extended register state in the
+processor. The `xregs` file and the `PCSXREG` command cover this use
+case. The question that then leads us to is what is the actual design
+that we should use for this.
+
+First a few observations:
+
+* One on the one hand, we would prefer to use a valid xsave-style
+  structure, because this makes it easier for applications to
+  potentially use this for their own purposes and makes it easier for us
+  to implement that. However, there are a few notable challenges:
+** The offsets of the xsave structure vary from CPU to CPU.
+** Not all CPUs support the compressed xsave structure.
+** The simplicity in the implementation may disappear the moment we use
+   a compressed form in the kernel if we're not using the compressed
+   user form.
+** It is not clear if this is actually a valuable property in practice.
+   Applications that actually wanted to manipulate their own state
+   directly probably would not use /proc for it and a debugger itself
+   would just use the setting capabilities to set this for a given
+   thread. There isn't much value in using the agent LWP for this.
+
+* There are many states in an xsave structure that the OS doesn't use or
+  support, making it such that the actual uncompressed format can be
+  quite wasteful. However, the compressed form may skip components,
+  which means correctly assembling something can be much more difficult.
+
+* Core files and debuggers need to know the ordering of the structure
+  layouts. We don't want folks to have to call cpuid to obtain specific
+  information.
+
+* The set of features which may be sent in these structures is going to
+  change over time, making compatibility a concern. This gets harder
+  when we consider AMX and the fact that it is unlikely to be enabled or
+  opted into by default and will instead be disabled until asked for by
+  the process. This may change what we want to include.
+
+* While there is some space for software in the xsave header which is
+  ignored, we also want to assume we may have auxiliary information
+  that, while not today, will eventually exceed that space. Examples of
+  this include providing read-only access to `xcr0`, `IA32_XFD`, etc.
+
+With this in mind, let's start by noting a few paths that we don't think
+work well on their own. In particular, we don't want to just make this
+the raw `xsave` standard or compressed form factor with no other
+metadata. This would cause us to need to expose this information in
+another way, whether a separate system call, /proc file, ioctl on the
+cpuid device, or something else. It would also require us to get a
+separate ELF note in a core file.
+
+If we look at the different implementations, what Solaris has done here
+is to suggest their own fixed layout that includes every user state
+component that exists. The benefit to this approach is that there is a
+fixed layout that can always be used and is extensible. It does mean
+that if a given CPU doesn't support a component, there is more that
+needs to be done to translate to and from the appropriate type. An
+application will need to review the embedded version of `xcr0` to see
+what fields in this structure are actually valid and allowed to be used.
+Just because a field is in the structure does not mean that it is legal
+to fill out say the ZMM state because a CPU may not support AVX-512. In
+addition, it also means that for an application to be able to use this
+structure, they will need to do more work.
+
+This last concern rears its head in a different way when we consider the
+actual compressed form factor. While the compressed form factor is a
+simpler way to express this structure, it makes it much harder for an
+application to be able to transform the values found into something
+else. Now, this cost may be something we can mitigate with say `libproc`
+taking care of the lifting and reinsertion, so these considerations may
+not hold much point as it is likely that it'll end up wanting to
+restructure the data internally to the library to make manipulating this
+easier.
+
+Traditionally the `/proc` structures are all a giant structure or union
+with fixed and known offsets. Deviating from that isn't unreasonable and
+buys some flexibility; however, it does come with some costs and
+complications. Applications would need to know how large a structure to
+allocate to cover everything and the static structure would not be the
+best. However, it may be that as this state continues to grow, as Intel
+shows no sign of stopping, that declaring this on the stack is really
+not an acceptable long-term path due to its growth. Given that just the
+AVX-512 state and the AMX state is already 10 KiB, what is being saved
+may no longer be worthwhile. We also need to remind ourselves that this
+is not the hot path and memory allocation occurring somewhere is not the
+end of the world.
+
+With that in mind, let's get to a few different concrete proposals:
+
+==== The Hybrid Approach
+
+Our primary proposal right now is a hybrid design here. The `xregs` file
+would include not just the raw data, but also structures that described
+where to find everything. Consider an initial `prxregset_t` header that
+looks like:
+
+----
+typedef struct prxregset_info {
+	/*
+	 * Types are semantic types that we define, not necessarily,
+	 * though generally 1:1 mapped to xsave bits.
+	 */
+	uint8_t pri_type;
+	uint8_t pri_pad[3];
+	/*
+	 * Example flags include right now:
+	 *   o Entry included, though that could be covered by offset is
+	 *     zero
+	 *   o 64-byte alignment required in compressed
+	 */
+	uint32_t pri_flags;
+	uint32_t pri_size;
+	uint32_t pri_offset;
+} prxregset_info_t;
+
+typedef struct prxregset {
+	uint32_t pr_type;
+	uint32_t pr_size;
+	/*
+	 * Flags used to indicate extensions.
+	 */
+	uint32_t pr_flags;
+	uint32_t pr_data_off;
+	uint32_t pr_ninfo;
+	prxregset_info_t pr_info[];
+} prxregset_t;
+----
+
+Each of the info entries would describe where to find a given state
+component. As the xsave area is required to always have the legacy and
+xsave header, that is what the top-level `pr_data_off` would indicate.
+The top-level `pr_type` would indicate that it is this particular
+version of an xsave style data and `pr_size` would reflect the total
+overall size of the structure.
+
+By including where to find everything and telling applications that that
+is what they should rely upon, it allows us to optionally rearrange and
+compress items to minimize what we copy out versus just zero in the
+future. However, we would generally suggest that this mimic the standard
+uncompressed xsave structure and that the info pieces and the initial
+header would be expected to be read-only. Put differently someone using
+`PCSXREG` would still write this information, but it would be expected
+to match what we have already written there. This still allows someone
+to fill out a component that would have been optimized away in the
+compressed format. This would ultimately look like:
+
+----
+  +-----
+  | prxregset_t
+  | header
+  +-----
+  +-----
+  | prxregset_info_t []
+  | metadata
+  +----
+  +-----
+  | Padding to 64 bytes
+  +-----
+  +-----
+  | full, uncompressed
+  | xsave structure
+  +-----
+----
+
+This does require more user work to parse it (hopefully made easier by
+libproc). It also means that users would need to either read the header
+or stat the file to determine how large it should be. But this has a few
+advantages in that it does allow us to create a more compressed variant
+in the future that is tailored to the features that the process is
+allowed to use and also means that features that aren't supported on the
+CPU but are on another aren't there.
+
+An open challenge with this is that while it would give us the ability
+to later optimize what is in here with respect to offsets and
+compressing the file's overall size and allow us to ignore a lot of
+zeros on some processors, we could not do so without eliminating the
+ability to use the actual xsave structure. It is not clear that that is
+a valuable property.
+
+An alternate consideration here is to allow us to take any xsave state
+being written to us. That is writing this doesn't have to use or
+leverage the offsets that we have written in. That would allow us in
+theory to write a compressed save state out here and allow someone else
+to write a new compressed state that didn't have this information.
+
+==== Alternate Approach: Fixed Structures
+
+An alternate approach is to take something that more or less follows
+with Solaris has done here. This would require us to make sure we expose
+`xcr0` (which we should do anyways). This still requires consumers to
+parse the information that exists to determine what is valid and what
+will be accepted. The main difference between this structure and the one
+above isn't that things won't have some parsing, but what parsing tells
+us. In this world we need to figure out both if a state component should
+even be valid, and then, is it present. In the prior world, you only
+need to determine if it is present, only items that could possibly be
+valid (even if they're in their initial state) will be written out.
+
+XXX More approaches?
+
+=== libproc
+
+The libproc design expects a single atomic getting and setting of the
+entire register set today with the `Plwp_getregs`, `PLwp_getfpregs`, and
+`Plwp_getxregs` families. libproc also has functions like `Pputareg` and
+other related things which are used to get individual registers and
+thread-specific versions that are used by tools like `truss` and `nohup`.
+
+Today, mdb does not support setting the FPU regs. While there are the
+bulk get/set entry points, we think it may be worth adding more specific
+entry points into libproc for FPU registers ala `Lputareg`.
+
+XXX Flush out in more detail
+
+=== Signal Stack Sizing
+
+To facilitate proper sizing of stacks, we propose that the following
+macros are transformed into sysconf calls similar to what glibc has
+done:
+
+* `MINSIGSTKSZ` turns into `sysconf(_SC_MINSIGSTKSZ)`
+* `SIGSTKSZ` turns into `sysconf (_SC_SIGSTKSZ)`
+* `PTHREAD_STACK_MIN` is already `sysconf(_SC_THREAD_STACK_MIN)`
+
+While GNU requires guards for these and strictly speaking these may not
+be the most POSIX compliant forms, we propose to make them default to
+this form initially unless issues crop up when performing bulk builds.
+Given that this has already been done for the pthread case, that gives
+us additional confidence to do this.
+
+Internally, libc will determine these sizes based on a heuristic and
+dependent on the `AT_SUN_FPSIZE` auxiliary vector macro. Sizes will be
+rounded up to the nearest 1 KiB boundary after taking this into account.
+A word of caution that we should consider here is that right now this is
+meant to help tell rtld what to do. If we were to adopt the use of
+`xsavec` in rtld to reduce the save/restore amount and allocation, then
+we may need to think more carefully about this size as in theory we
+could tell rtld to reserve less stack usage based on what we know is
+enabled in xcr0. The second cautionary tale for this is that once we
+commit to requiring AMX to be explicitly enabled, that means that this
+value can change. While it likely makes more sense to address this when
+we get to the point of supporting AMX, it's worth keeping in mind. Other
+systems have introduced an `AT_MINSIGSTKSZ`; however, that's not really
+what we want to have for things like rtld to figure out the best course
+of action. For the time being, we opt not to change anything.
+
+We suggest the following initial computations:
+
+* Minimum stack sizes should start from the existing libc definitions of
+  4 KiB and 8 KiB (which is what is returned in
+  `sysconf(_SC_THREAD_STACK_MIN)`. If the FPU state is more than 1 KiB,
+  then we should increase the stack size correspondingly.
+
+* We should increase the default signal stack sizes probably from 8 KiB
+  to at least 32 KiB, increasing it again if the FPU state size is more
+  than 1 KiB.
+
+The next complication to consider is what do we do in the actual
+implementation of `sigaltstack()` in the kernel. In particular, it
+checks that the size is at least `MINSIGSTKSZ`, which applications have
+historically thought to be 2 KiB. Strictly speaking some applications
+may have a very bad day on an alternate signal stack with AVX-512
+active. However, in the spirit of backwards compat, it is likely better
+to allow this applications to run and then fail at run-time if such a
+case actually occurs than to fail `sigaltstack`.
+
+This suggests the following options to consider:
+
+. We retain to the 2 KiB minimum stack size in `sigaltstack()` for all
+programs and just allow a run-time failure when this occurs. While not
+great, this isn't dissimilar to a stack overflow; however, it's one the
+system could have helped avoid.
+. We introduce a new symbol version for `sigaltstack()` such that newly
+built software can be told your alternate signal stack is too small.
+This when combined with the changes to the macros used, should allow us
+to at least be in a reasonable spot to avoid failures for applications.
+If this approach was taken, we should change the approach by which this
+information is derived and have `sysconf` ask the kernel for it
+dynamically as a way of preparing for AMX.
+. We just begin failing calls that don't meet the new minimum signal
+size, saying we're sorry this no longer runs, but it's better than the
+possibility of overflowing your stack. This could be varied to determine
+whether or not we actually fit the signal stack or not.
+
+While it has more complexity, it is likely that (2) is our best option
+and gives us the right balance of making sure new applications can get
+proper failures while existing, built things aren't broken on an update.
+It does increase the testing burden of that change and at the minimum an
+audit of illumos internally.
+
+== Recommendations for New Architectures
+
+This section provides several suggestions for how to think about new
+architecture ports that are ongoing or yet to be undertaken and things
+to do to make this process smoother, if possible.
+
+UCONTEXT::
+
+* Architectures should ensure that `uc_flags` has free values and that
+  there are several pointers worth of `uc_filler`. Assume that brands
+  will use one word of filler at least, that we will want a pointer
+  to an extended FPU state, and that there must be at least one word as
+  an escape hatch for additional things. We suggest at least 4 longs
+  worth of data, plus whatever filler shows up due to padding.
+* In general, the mcontext should assume that it has the basic ISA
+  defined floating point state, but that there will be a variable sized
+  extended floating point state. For example, ARM has both the NEON /
+  VFPv3 and SVE extensions. We might expect the VFP/Neon bits to be part
+  of the standard mcontext, while the SVE function like the xregs. If
+  the save state actually overlaps (like it does with xsave), prefer
+  having only a single thing rather than both.
+
+SIGNAL STACKS::
+
+* The `MINSIGSTKSZ` and `SIGSTKSZ` should always be their `sysconf`
+  based alternates.
+* Applications should always fail if they request too small a signal
+  stack.

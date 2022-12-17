@@ -38,7 +38,7 @@ being a rather large vector processing unit. This is even being extended
 by the addition of a full Matrix Processing extensions.
 
 There have been multiple different ways to save and restore the state in
-the FPU. Iniitally there was the `fsave`/`fnsave` instruction which
+the FPU. Initially there was the `fsave`/`fnsave` instruction which
 stored it in one format and handled the 80-bit FPU state. This was used
 for a while and became part of the i386 System V ABI (more on that
 later). The structure for this is the the
@@ -334,6 +334,294 @@ this to change.
 While we don't support AMX today, it's worth understanding what this
 means and we'll go into that into a bit more detail when we discuss the
 solution space. The important take away is that the amount of register
-space this covers is only growing.
+space this covers is only growing. As part of this, it's worth calling
+out that because this has even more dramatic challenges with the signal
+stack size and just the sheer cost of tracking and preserving these, in
+Linux, Intel and others are exploring this functional unit not being
+enabled by default for a process unless it promises that it's ok to use
+it.
+
+This has been implemented through an architecture-specific prctl related
+function that was introduced in https://lwn.net/Articles/874846/[Linux
+5.16].
+
+==== Performance Gotchas
+
+When AVX and AVX-512 in particular is active the CPU may often slow down
+its overall clock rate. The interesting question is what determines
+activity. Here it's worth calling out to some historical issues here
+such as https://www.illumos.org/issues/9596[illumos#9596 Initial xsave
+xstate_bv should not include all features] and
+https://www.illumos.org/issues/9595[illumos#9595 rtld should
+conditionally save AVX-512 state]. The main point of these is to keep in
+mind that misuse of states can lead to the processor slowing down even
+if we're not using the extended state, but just the processor believing
+it is valid. Though we expect that processors have gotten better from
+those days.
 
 === System V Context Operations
+
+There are a suite of functions and data structures that have
+traditionally been used to manage what were called contexts. This
+involves the types:
+
+* `ucontext_t` -- a somewhat opaque, ABI defined structure that
+  describes the user's overall context.
+
+* `mcontext_t` -- a somewhat opaque, ABI defined structure that
+  describes the hardware-specific portion of a context. It is generally
+  embedded in the `ucontext_t`.
+
+Related to this are a suite of four functions that are often used for
+obtaining these states:
+
+* https://illumos.org/man/2/getcontext[`getcontext(2)`] -- This is used
+  to obtain a context about for the current thread.
+
+* https://illumos.org/man/2/makecontext[`makecontext(2)`] -- This takes
+  an existing context and modifies it so that when it is restored, it
+  will be used to call a specified function that is part of its
+  arguments.
+
+* https://illumos.org/man/2/swapcontext[`swapcontext(2)`] -- This
+  provides a way of calling into a new context while retrieving the
+  current one in one fell-ish swoop.
+
+* https://illumos.org/man/2/setcontext[`setcontext(2)`] -- This takes
+  the specified context and it makes it the current reality. A function
+  call to setcontext does not return in the conventional sense.
+
+These functions all exist for building up a way of performing user-level
+context switching without the kernel being involved in knowing about it.
+However, there are a couple things that are worth calling out that make
+these different from when the kernel traditionally swaps out what's
+running on the CPU:
+
+* The kernel is really interrupting a thread and therefore must save and
+  restore **all** of its state.
+* When calling one of these functions, it is treated as a function call
+  from a calling convention sense (whether getting or setting state).
+  You'll also note that `makecontext` starts you at a function call
+  entry. This means, the basic calling conventions about what registers
+  have to be preserved or not need to be honored.
+
+You'll note above we called the `ucontext_t` and `mcontext_t` somewhat
+opaque. These structures vary for each architecture and vary between
+Operating Systems. While the very original i386 `ucontext_t` and
+`mcontext_t` were defined in the System V i386 ABI Supplement, the same
+was not done in the amd64 documents or the much more recent ARM draft
+documents. Despite all that, applications do assume that they can peak
+inside and modify these structures.
+
+In the strictest sense, these are not opaque and the types are a
+fundamental part of the ABI. For better or worse, the primary
+`ucontext_t` structure on x86 (that is for both 32-bit and 64-bit
+environments) looks like:
+
+----
+struct  ucontext {
+        unsigned long   uc_flags;
+        ucontext_t      *uc_link;
+        sigset_t        uc_sigmask;
+        stack_t         uc_stack;
+        mcontext_t      uc_mcontext;
+        long            uc_filler[5];   /* see ABI spec for Intel386 */
+};
+----
+
+Note, that while the `uc_filler` currently has a comment in the source
+code that suggests seeing the ABI spec, this filler has not been used.
+This is an important thing! Let's briely discuss this structure. The
+`uc_flags` member is used to indicate which other members are actually
+valid and should be honored. There are flags that cover the signal mask,
+the stack, CPU state, and FPU.
+
+While this is the same on both architectures, the `mcontext_t` is quite
+different because of the different registers that exist. The initial
+`mcontext_t` structure is actually quite simple:
+
+----
+typedef struct {
+        gregset_t       gregs;          /* general register set */
+        fpregset_t      fpregs;         /* floating point register set */
+} mcontext_t;
+----
+
+The `gregset_t` is actually just an array where the main difference is
+how many registers are part of that state. The `fpregset_t` is where
+things get interesting, nuanced, and is the true heart of darkness of
+our problem.
+
+The i386 version of the structure is phrased as what appears to be an
+original `fnsave` style structure with a bunch of additional ways to
+view the data. This was at some point in history amended to include the
+8 xmm registers. It's not clear when that entered the actual i386 ABI
+structure as it is not part of the original SCO ABI supplement.
+
+The amd64 version however, is exactly the same as the fxsave_state (note
+not `xsave`) with additional status words added on. This tied into the
+default expectations of the ABI. All of this means that these functions
+don't think about or handle anything related to `xsave`-based state.
+
+It's an interesting question as to whether they can or cannot; however,
+it makes it pretty hard to do based on the existing shape and
+expectations of things like `getcontext(2)`. While the `uc_flags` member
+is used to try to determine what is supposed to be considered valid and
+not; however, it's pretty clear from the documentation that folks expect
+most of the traditional default flags to be set and the kernel is not
+meant to actually read the existing `uc_flags` member because is it
+uninitialized stack garbage as part of a call to `getcontext(2)`. Put
+differently, this is only valid in the context an initialized structure.
+
+With this understanding of the context structures, let's go and dive
+into everyone's favorite UNIX feature: signals!
+
+=== Signals in the Dark
+
+So where does all of the above collide: signal handling. Let's discuss
+what happens on a signal and how illumos returns from a signal. Signal
+handling has an important semantic: The signal handler basically has its
+own register state and shouldn't be able to really change the register
+state of the interrupted context (absent explicit action). In this
+sense, it's much like a hardware interrupt or really like the kernel
+opting to switch away to another thread.
+
+So, how does this actually become reality? Every instruction set
+architecture implements a `sendsig()` function in the kernel. This is
+responsible for figuring out how to actually make a signal reality.
+Signal handling is a joint cooperation between libc and the kernel.
+Let's first go into what the kernel does when a signal is to be
+delivered:
+
+. The kernel looks at the singal's mask and disposition. If the signal
+is masked, nothing really happens. If the signal's disposition is to
+ignore it or to kill the process, then both of those things happen.
+Let's assume we're delivering a signal.
+. The next thing the kernel does is to determine whether or not the
+signal should be delivered on the current stack or an alternate stack.
+. It begins to construct a stack frame that varies between i386 and
+amd64.
+. The system saves the current thread's context with the equivalent of
+the `getcontext(2)` system call.
+. The entire `ucontext_t` structure is pushed onto the stack.
+. Pointers to a `siginfo_t` are pushed on the stack (which itself may
+already be there)
+. The signal number is pushed onto the stack.
+. A garbage return address is pushed onto the stack.
+. It changes around the current registers that the process will resume
+with changing things like:
+* Making the stack pointer point to the signal stack.
+* Changing the instruction pointer to map to whatever function libc had
+  registered previously and giving it the appropriate arguments.
+* Making sure that various segment registers, and other bits are set up
+  to ensure reliable delivery.
+
+Unlike some other kernel implementations, the `sigframe` and
+`sigframe32` structures to not exactly cover the entire format (e.g.
+they don't include the ucontext_t). After the context is saved and
+everything is set up, the thread will copy everything out, and then
+proceed to return to user land. If for some reason signal delivery
+failed (e.g. invalid alternate stack pointer, stack overflow, etc.) the
+kernel will proceed to instead kill the process.
+
+When the signal comes to userland, we arrive in the main libc entry
+point: `sigacthandler`. When a process calls
+https://illumos.org/man/2/sigaction[`sigtaction(2)`] to register a
+signal handler, libc stores that information itself and then registers
+its own function as the entry point and there are a bit of things that
+libc will do before calling the actual signal handler. Once the signal
+handler has completed, then we will normally come back to this call and
+libc will finally return to the original context calling `setcontext(2)`
+on what it was given.
+
+You'll note that we said that we only saved the `ucontext_t` above and
+that the `ucontext_t` only actually contains the basic ABI state so on
+amd64 in particular, this only has the original `fxsave` state. This is
+exactly what leads to the issues that we saw
+https://www.illumos.org/issues/15254[illumos#15254 %ymm registers not
+restored after signal handler].
+
+Applications though are actually allowed to change the `ucontext_t` on
+the stack. That is, they know that they have a `ucontext_t` passed to
+them in the signal handling function (assuming they filled out
+`sa_sigaction`) and folks then do modify the context that they return
+to. This actually happens with programs more than you might expect.
+Consider the case of the Java Virtual Machine. When it has a
+`NullPointerException`, that has in the past actually been the `SIGSEGV`
+signal being handled.
+
+While whether modifying state should or shouldn't be done may be a
+reasonable question, the reality is that folks do and therefore we need
+to consider this and this adds further cementing of the `ucontext_t` and
+`mcontext_t` ABI.
+
+==== Jumping Away
+
+All this is fine, but there's more nuance here: one can actually return
+out of a signal another way. You can actually use the
+https://illumos.org/man/3C/siglongjmp[`siglongjmp(3C)`] family of
+functions to leave things in a context of a signal handler. So what's
+happening here? First, the `jmp_buf` is an opaque array that we just
+happen to stuff a `ucontext_t` into. Fancy that. This is done in a
+combination of assembler and C functions, but does not ultimately call
+`getcontext(2)`.
+
+It also does not actually obtain or save the floating point state! So
+this means that jumping out of this state leaves the FPU in a rather
+undefined state. In particular, we don't actually have `UC_FPU` set in
+the context and thus we don't actually restore the FPU state to anything
+and it is left as whatever it was when it was last used.
+
+==== Sizing the Signal Stack
+
+Traditionally, a combination of POSIX and System V standards have led
+there to be definitions for the minimum and a default signal size used
+for the stack. In particular, these constants have been:
+
+`MINSIGSTKSZ` and `SIGSTKSZ` which is a recommend size. These
+respectively have been 2 KiB and 8 KiB. While this was kind of ok in the
+days of the original x86 `ucontext_t`, with the ever increasing size of
+the `mcontext_t`, we need to think a bit more proactively here. In
+particular, it can be possible that by the time all of the xsave state
+is dumped to a stack, that it will not be able to handle the signal or
+overflow an alternate signal stack.
+
+There has been a bit of prior art in handling this. In particular, glibc
+has gone and made these macros calls to
+https://illumos.org/man/3C/sysconf[sysconf(3C)] in many situations. As
+part of us evaluating the solution space, we will be exploring this in
+more detail. But this is yet another piece of the puzzle.
+
+=== /proc and Core File Observability
+
+`/proc` is the main what the debuggers and the system have observability
+about the state of registers in the system. This shows up in a bunch of
+different places using the types of `prgregset_t` and `prfpregset_t`.
+These structures are basically the exact same as their `mcontext_t`
+compatriots of the `gregset_t` and `fpregset_t`, being all of a
+`#define` in the x86-specific procfs headers.
+
+Traditionally the registers for a thread are read out of its `lwpstatus`
+file (i.e. `/proc/<pid>/lwp/<lwpid>/lwpstatus`). This provides a field
+for both the general and floating point registers. In turn, registers
+are set in a different way. Here, the `PCSREG` and `PCSFPREG` commands
+are issued upon the `/proc/<pid>/lwp/<lwpid>/lwpctl` file determined by
+a write. This is also abstracted by
+https://illumos.org/man/3LIB/libproc[libproc(3LIB)] and its
+corresponding functions such as
+https://illumos.org/man/3PROC/Plwp_getregs[Plwp_getregs(3PROC)] and
+https://illumos.org/man/3PROC/Plwp_setregs[Plwp_setregs(3RPOC)].
+
+There are several additional files that exist in per-LWP directory in
+`/proc` that cover different aspects of the process. In particular, one
+of the files is the `xregs` file which is meant to contain extended
+registers that are ISA-specific. There is a corresponding write
+operation entitled `PCSXREG` that covers writing this and parts of
+libproc.
+
+The ELF notes that are used to make up core files follow a similar style
+which are documented in https://illumos.org/man/5/core[core(5)].
+Effectively, for every LWP we will write out a note with the contents of
+the corresponding `prgregset_t`, `prfpregset_t`, and the `prxregset_t`.
+Right now x86 doesn't have an `xregset` file or definition, so nothing
+is written out there.

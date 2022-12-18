@@ -26,7 +26,20 @@ IPD are:
 
 == Summary of Proposed Changes
 
-XXX
+* Introduce a new `UC_XSAVE` to indicate that some portion of the
+  extended state has been saved in signal handler context. This will be
+  restored by `setcontext()`.
+* Implement the `xregs` file and `PCSXREG` command in
+  https://illumos.org/man/5/proc[proc(5)] using the proposed hybrid
+  layout. This will also show up as an elfnote with support added to the
+  appropriate tools.
+* Change how the minimum and recommended signal and pthread stack sizes
+  are implemented to be built on sysconf.
+** Provide a way to dynamically query the kernel for this for a given
+   process as it may change on a per-process basis in the future given
+   other features like Intel AMX or a desire to support ARM SVE.
+* Extend libproc, libc_db, mdb, and related to allow visibility and
+  manipulation of the extended FPU state.
 
 == Background
 
@@ -983,9 +996,38 @@ even be valid, and then, is it present. In the prior world, you only
 need to determine if it is present, only items that could possibly be
 valid (even if they're in their initial state) will be written out.
 
-XXX More approaches?
+In this case, the structure might look something like:
 
-=== libproc
+----
+typedef struct prxregset {
+	uint32_t pr_type;
+	uint32_t pr_size;
+	uint32_t pr_pad[2];
+	struct fxsave pr_fxsave;
+	struct xsave_header pr_xsave;
+	/* YMM state */
+	/* ZMM state */
+	/* future supported user structures */
+} prxregset_t;
+----
+
+We could also look at making this binary compatible with Solaris, though
+there are a few considerations that we would need to make that may
+eventually lead to us no longer being compatible as while we're playing
+catch up here, we do not want to say that we can't add something because
+they haven't. There are a few other questions that we want to ask
+ourselves in genera with this approach:
+
+* Do we want to include MPX when we don't support it and it seems in
+  general support for MPX is on the decline as it was removed from the
+  https://gitlab.com/x86-psABIs/x86-64-ABI/-/merge_requests/39[amd64
+  psABI]?
+
+* Does it matter where we insert registers for things like `xcr0`,
+  `IA32_XFD`, and other information required for someone to tell how
+  they fit in?
+
+=== libproc and mdb
 
 The libproc design expects a single atomic getting and setting of the
 entire register set today with the `Plwp_getregs`, `PLwp_getfpregs`, and
@@ -995,9 +1037,22 @@ thread-specific versions that are used by tools like `truss` and `nohup`.
 
 Today, mdb does not support setting the FPU regs. While there are the
 bulk get/set entry points, we think it may be worth adding more specific
-entry points into libproc for FPU registers ala `Lputareg`.
+entry points into libproc for FPU registers ala `Lputareg`. As part of
+this we will explore the following:
 
-XXX Flush out in more detail
+* Updating mdb to ensure that it will output all of the vector FPU
+  registers as appropriate and figure out a way to better show different
+  vector sizes as well as specific, individual registers.
+* Exploring ways in mdb and libproc to update individual FPU registers
+  and understand what the largest alias of a register is. This is all in
+  addition to the exisitng bulk put interface that libproc offers.
+* The existing libproc xregs functions will be re-evaluated due to
+  allocation needs that are going to continue to stem here. The existing
+  libproc APIs do not provide the required fleixibility for the
+  structure increasing in size for existing consumers.
+
+The exact APIs that will come out of this and user interfaces will be
+subject of exploration during development.
 
 === Signal Stack Sizing
 
@@ -1089,13 +1144,25 @@ UCONTEXT::
   to an extended FPU state, and that there must be at least one word as
   an escape hatch for additional things. We suggest at least 4 longs
   worth of data, plus whatever filler shows up due to padding.
-* In general, the mcontext should assume that it has the basic ISA
-  defined floating point state, but that there will be a variable sized
-  extended floating point state. For example, ARM has both the NEON /
-  VFPv3 and SVE extensions. We might expect the VFP/Neon bits to be part
-  of the standard mcontext, while the SVE function like the xregs. If
-  the save state actually overlaps (like it does with xsave), prefer
-  having only a single thing rather than both.
+* There are two approaches to how to construct the `mcontext` and
+  `ucontext` state. What matters here is whether extended vector state
+  is meant to overlap with the basic FPU state or not. For example on
+  x86 there is clear overlap and on ARM SVE overlaps with VFP/Neon.
+** Where there is no overlap, we suggest that folks build the basic
+   stable FPU registers into the normal mcontext and have a variable
+   lenth pointer ala what is described here for the rest of it.
+** On systems where the two states overlap, we suggest only having a
+   single save state to avoid the challenge that we have with the
+   traditional FPU and the other pieces. What is viable will depend on
+   the calling conventions of the platform and the save instructions. If
+   possible, avoiding the encoding of the FPU in a fixed register is
+   recommended due to challenges there.
+* While adding padding to the mcontext may be useful, it is hard to
+  predict what is a useful amount. There is no good way or appropriate
+  amount to reserve that'll properly cover everything, therefore the
+  best courses is to focus on the fact that signal handlers can spill
+  everything and then to minimize what extended registers are stable
+  interfaces until the need is proven otherwise.
 
 SIGNAL STACKS::
 

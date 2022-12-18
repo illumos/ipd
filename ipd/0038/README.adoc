@@ -11,9 +11,8 @@
 
 As of this writing, illumos does not properly preserve the extended x86
 register state as part of signal handling. This issue is documented in
-[15254 %ymm registers not restored after signal
-handler](https://www.illumos.org/issues/15254). The main goals of this
-IPD are:
+https://www.illumos.org/issues/15254[15254 %ymm registers not restored
+after signal handler]. The main goals of this IPD are:
 
 * To explain the challenges that we're facing and give appropriate
   context.
@@ -87,9 +86,9 @@ instructions. This resulted in a new structure and a new series of
 instructions. 8 128-bit registers were added that were called `%xmm0`
 to `%xmm7`. This resulted in a new structure to save and restore the
 state that covered both the traditional x87 FPU state from fnsave and
-the new state with the `fxsave` instruction. This produced the [`struct
-fxsave_state`](https://github.com/illumos/illumos-gate/blob/7b5987898994d86cd20e00dbf8c305dfbfbb8bea/usr/src/uts/intel/sys/fp.h#L201-L231).
-This looks like:
+the new state with the `fxsave` instruction. This produced the
+https://github.com/illumos/illumos-gate/blob/7b5987898994d86cd20e00dbf8c305dfbfbb8bea/usr/src/uts/intel/sys/fp.h#L201-L231[`struct
+fxsave_state`]. This looks like:
 
 ----
 struct fxsave_state {

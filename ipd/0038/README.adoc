@@ -23,6 +23,10 @@ after signal handler]. The main goals of this IPD are:
 * Provide guidance for what should be done on future ports and other
   systems.
 
+NOTE: Specifics of these proposals may change as we get into actual
+implementation and we gain experience. This document will be updated to
+reflect that.
+
 == Summary of Proposed Changes
 
 * Introduce a new `UC_XSAVE` to indicate that some portion of the
@@ -37,14 +41,17 @@ after signal handler]. The main goals of this IPD are:
 ** Provide a way to dynamically query the kernel for this for a given
    process as it may change on a per-process basis in the future given
    other features like Intel AMX or a desire to support ARM SVE.
+** Attempt to prevent newly compiled applications from using a signal
+   stack that might cause then to be unable to receive a signal.
 * Extend libproc, libc_db, mdb, and related to allow visibility and
-  manipulation of the extended FPU state.
+  manipulation of the extended FPU state. Investigate variants that take
+  care of the underlying structure information.
 
 == Background
 
 To fully understand what's going on, it's worth understanding several
-different pieces and mechanisms that exist in the system that are all
-inter-related.
+different pieces and mechanisms that exist in the operating system and
+CPUs that are all inter-related.
 
 === x86 FPU and its Endless Extensions
 
@@ -131,27 +138,30 @@ was used for a while.
 
 ==== Enter AVX and xsave
 
-In Intel's Sandy Bridge based systems Intel started on a trend of
-growing the FPU state. The 16 128-bit xmm registers became 16 256-bit
-registers. You can guess where this is going by this point: Intel needed
-a new save and restore mechanism again. This was introduced with the
-`xsave` instruction. However, rather than make the structure a fixed
-size, they actually did a bunch of additional work and created something
-that has had the flexibility to actually withstand several generational
-changes.
+Starting with Intel's Sandy Bridge based systems, Intel started on a
+trend of growing the FPU state. The 16 128-bit xmm registers became 16
+256-bit ymm registers. You can guess where this is going by this point:
+Intel needed a new save and restore mechanism again. This was introduced
+with the `xsave` instruction. However, rather than make the structure a
+fixed size, they actually did a bunch of additional work and created
+something that has had the flexibility to actually withstand several
+generational changes.
 
 The xsave save area begins with the `fxsave_state`. It is then followed
-by an xsave-specific header. The xsave header is followed by two 64-bit
+by an xsave-specific header. The xsave header begins with two 64-bit
 bitfields. The first 64-bit bitfield is used to indicate which
-subsequent structures are present and valid. Each structure begins at a
-fixed offset. Those fixed offsets are described by CPUID. Effectively
-what happens is that each state component in CPUID tells us what offset
-it begins at and where it is found.
+subsequent structures are present and valid and is called in Inte
+parlance the 'xstate_bv' (or extended states bit vector). Each structure
+begins at a fixed offset and has a pre-determined size which holds
+regardless of whether the structure is actually valid (that is its bit
+is indicated in xstate_bv). The fixed offsets and sizes are discovered
+and described by CPUID leaf 0xd. Each state type uses a sub-leaf to get
+tat information.
 
 An important thing to realize is that these offsets **do** vary between
 vendors and systems. For example if we look at a Skylake System that
 supports AVX-512 and an AMD Genoa system that supports AVX-512, here are
-the offsets of different features that we have in the kernel:
+the offsets of different features that we care about in illumos today:
 
 .Comparison of xsave offsets
 [opts="header",cols=3]
@@ -169,19 +179,19 @@ important implications for the observability design that we'll come back
 to later.
 
 While there are many possible features in the processor, the OS may only
-have done enabling support for them. As such, there is a register called
-`xcr0`, which is the extended control register. This is read and written
-to with the `xgetbv` and `xsetbv` instructions, the latter of which is
-restricted to CPL 0 (e.g. the kernel). This is used to constrain what
-`xsave` and `xrstor` will perform. In particular, things are only saved
-and restored if they're enabled in xcr0 and in the corresponding
-instruction masks / valid state bits. This makes it so that even if a
-user sets additional bits into an xsave state, they won't be saved or
-restored unless they're something that is known.
+have done enabling support for a subset of them. As such, there is a
+register called `xcr0`, which is the extended control register. This is
+read and written to with the `xgetbv` and `xsetbv` instructions, the
+latter of which is restricted to CPL 0 (e.g. the kernel). This is used
+to constrain what `xsave` and `xrstor` will perform. In particular,
+things are only saved and restored if they're enabled in xcr0 and in the
+corresponding instruction masks / valid state bits. This makes it so
+that even if a user sets additional bits into an xsave state, they won't
+be saved or restored unless they're something that is known.
 
 With the introduction of xsave, the OS moved to using it for saving and
 restoring the FPU state on context switch; however, we did not update
-anything in the signal handling or /proc paths to account for this in
+anything in the signal handling or `/proc` paths to account for this in
 the various ABIs (again more ahead).
 
 ==== Supervisor vs. User and State Explosion
@@ -216,7 +226,8 @@ offsets in the structure, each bit that is present in the feature set
 has its data placed contiguously. So if the xsave structure had say only
 one bit marked present in the bitfield, even if its normal cpuid offset
 would suggest it be at much further part in the structure, it'll be
-placed first.
+placed first. Some features require that they be start at the next
+64-byte aligned section, so there often can still be padding.
 
 The compressed form uses the `xsavec` instruction to save the resulting
 state. To restore state, the normal `xrstor` instruction can be used,
@@ -258,7 +269,7 @@ that if a given component is in what it defines as the default state,
 then these things will no bother writing them out and will not set the
 bit in the xsave header indicating its presence.
 
-With the xsavec/xsaves style the init modification changes a bit.
+With the `xsavec`/`xsaves` style the init modification changes a bit.
 Basically there is a bit of a semantic thing they tried to fix, but it's
 a bit confusing. In particular, if someone has set the MXCSR value to
 something other than 0x1f80, then it will dump the XMM state if we
@@ -663,13 +674,13 @@ constraints on the solution space. First our problems:
 . We need to properly save and restore the FPU xsave state across the
 signal handler.
 * As part of this we need to set clear expectations about what state is
-  saved and restored across calls to `getcontxt()` and `siglongjmp()`.
+  saved and restored across calls to `getcontext()` and `siglongjmp()`.
 * We also need to assume that folks want the ability to modify the xsave
   state in the signal handler, regardless of our views on the merits of
   that.
 . We need to improve the observability of the xsave state both for
 debuggers and core files. Specifically this includes:
-* Updating /proc to have files for this.
+* Updating `/proc` to have files for this (i.e. `xregs`).
 * Updating libproc and mdb to get access to this state.
 * Updating the suite of surrounding tools and documentation.
 . We need to improve the way that signal stack sizing is performed for
@@ -684,7 +695,8 @@ We have the following constraints that we need to honor:
   access to all AVX state, including AVX-512, regardless of the size of
   their stacks.
 
-The following are explicit non-goals of this work:
+The following are explicit non-goals of this work (but it is possible
+some of them fall out for free):
 
 * Enable support for Intel AMX.
 * Change the kernel to take advantage of the compressed save format and
@@ -700,7 +712,7 @@ other system to try and answer the following questions:
 ** If so, what format does that leverage? The compressed or the
 uncompressed?
 * Does `getcontext()` save xsave state at all?
-* What, if any, /proc style interfaces to these registers exist?
+* What, if any, `/proc` style interfaces to these registers exist?
 
 [cols=6,options="header"]
 |===
@@ -715,8 +727,9 @@ uncompressed?
 | Kernel uses xsaves | Conditionally | No | No | No | Unknown
 | getcontext xsave | Appears no in glibc, not present in musl | No | No | getcontext() was removed | No
 | Register access
-| Full xsave state via ptrace | Full xsave state via ptrace | Full xsave via ptrace and /proc
-| fxsave state only?  | Uses own data format via /proc
+| Full xsave state via ptrace | Full xsave state via ptrace
+| Full xsave via ptrace and `/proc`
+| fxsave state only?  | Uses own data format via `/proc`
 | `MINSIGSTKSZ` | 2 KiB (musl, glibc), affected by kernel aux vector | 2 KiB | 8 KiB | 3 pages | ???
 | `SIGSTKSZ` value | 8 KiB (musl, glibc) | 36 KiB | 40 KiB  | 7 pages | ???
 |===
@@ -736,6 +749,14 @@ the highlights as we see them:
 * In general, the actual default and minimum signal stack sizes do vary
   a bit more widely than expected. This does give us a bit more
   flexibility than we might expect.
+* Regarding NetBSD, experimental evidence suggests avx state is saved
+  and restored; however, the
+  https://github.com/NetBSD/src/blob/9ebc005c7122f6014596209d153a73cf72895112/sys/arch/amd64/amd64/machdep.c#L628[cpu_getmcontext()]
+  call in the signal handling code leads to
+  https://github.com/NetBSD/src/blob/9ebc005c7122f6014596209d153a73cf72895112/sys/arch/x86/x86/fpu.c#L722-L733[process_read_fpgres_xmm()]
+  which only covers the fxsave data, though there is evidence of xsave
+  being used elsewhere. Most likely, we just haven't properly followed
+  the logic there.
 
 You'll note that we described Solaris as not quite using the compressed
 form factor. What they've done is to cause the xregset structure to have
@@ -765,6 +786,8 @@ Let's call out a few important items here:
   the ``fpregset_t``'s version of the legacy save area will override
   whatever is in the `UC_XSAVE` area. This preserves existing semantics
   in the ABI. If `UC_FPU` is not set, then it will not change anything.
+  This is similar to how Linux handles the overlap between SVE and Neon
+  on ARM.
 
 * While other signal handling contents are generally considered public,
   as we are introducing this and we know no applications can modify this
@@ -787,7 +810,8 @@ most sense to use only one. However, the tradeoff with what is proposed
 below is basically space. If AVX-512 is supported (in the first case and
 irregardless in the second proposal), then we will already overflow the
 minimum signal stack size. While we have subsequent proposals for this,
-it does cause us to pause and ask what makes the most sense.
+it does cause us to pause and ask what makes the most sense, especially
+given that most application are not using that extended register set.
 
 This ipd does not constrain what the implementation will be and we allow
 that to be determined based on the experience implementing the various
@@ -816,7 +840,7 @@ First a few observations:
    user form.
 ** It is not clear if this is actually a valuable property in practice.
    Applications that actually wanted to manipulate their own state
-   directly probably would not use /proc for it and a debugger itself
+   directly probably would not use `/proc` for it and a debugger itself
    would just use the setting capabilities to set this for a given
    thread. There isn't much value in using the agent LWP for this.
 
@@ -844,7 +868,7 @@ With this in mind, let's start by noting a few paths that we don't think
 work well on their own. In particular, we don't want to just make this
 the raw `xsave` standard or compressed form factor with no other
 metadata. This would cause us to need to expose this information in
-another way, whether a separate system call, /proc file, ioctl on the
+another way, whether a separate system call, `/proc` file, ioctl on the
 cpuid device, or something else. It would also require us to get a
 separate ELF note in a core file.
 

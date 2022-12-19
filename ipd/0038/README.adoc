@@ -29,9 +29,9 @@ reflect that.
 
 == Summary of Proposed Changes
 
-* Introduce a new `UC_XSAVE` to indicate that some portion of the
-  extended state has been saved in signal handler context. This will be
-  restored by `setcontext()`.
+* Introduce a new `UC_XSAVE` flag for the ucontext_t to indicate that
+  the extended xsave state has been saved in signal handler context.
+  This will be restored by `setcontext()`.
 * Implement the `xregs` file and `PCSXREG` command in
   https://illumos.org/man/5/proc[proc(5)] using the proposed hybrid
   layout. This will also show up as an elfnote with support added to the
@@ -150,13 +150,13 @@ generational changes.
 The xsave save area begins with the `fxsave_state`. It is then followed
 by an xsave-specific header. The xsave header begins with two 64-bit
 bitfields. The first 64-bit bitfield is used to indicate which
-subsequent structures are present and valid and is called in Inte
+subsequent structures are present and valid and is called in Intel
 parlance the 'xstate_bv' (or extended states bit vector). Each structure
 begins at a fixed offset and has a pre-determined size which holds
 regardless of whether the structure is actually valid (that is its bit
 is indicated in xstate_bv). The fixed offsets and sizes are discovered
 and described by CPUID leaf 0xd. Each state type uses a sub-leaf to get
-tat information.
+that information.
 
 An important thing to realize is that these offsets **do** vary between
 vendors and systems. For example if we look at a Skylake System that
@@ -218,16 +218,17 @@ in an optimized way using processor tracking. It sometimes makes sense
 to use, but we can't always use it (e.g. in rtld). The second thing that
 was done was the addition of a compressed form.
 
-The way that the compressed form work is that the normal fxsave data is
+The way that the compressed form works is that the normal fxsave data is
 still there, followed by the bitfields that describe what is present. A
-particular bit is used in the second uint64 bitfield that the structure
-is compressed. At that point, rather than use the cpuid defined fixed
-offsets in the structure, each bit that is present in the feature set
-has its data placed contiguously. So if the xsave structure had say only
-one bit marked present in the bitfield, even if its normal cpuid offset
-would suggest it be at much further part in the structure, it'll be
-placed first. Some features require that they be start at the next
-64-byte aligned section, so there often can still be padding.
+particular bit is used in the second uint64 bitfield to indicate that
+the structure is compressed. At that point, rather than use the
+cpuid-defined fixed offsets in the structure, each bit that is present
+in the feature set has its data placed contiguously. So if the xsave
+structure had say only one bit marked present in the bitfield, even if
+its normal cpuid offset would suggest it be at much further part in the
+structure, it'll be placed first. Some features require that they start
+at the next 64-byte aligned section, so there often can still be
+padding.
 
 The compressed form uses the `xsavec` instruction to save the resulting
 state. To restore state, the normal `xrstor` instruction can be used,
@@ -289,7 +290,7 @@ you likely are going to break the modified optimization, at least
 reading between the lines.
 
 Let's now turn our attention to the restore instructions. There are
-three primary cases that we want o consider. The first is what happens
+three primary cases that we want to consider. The first is what happens
 to the FPU state in the processor if the state bit isn't in the RFBM.
 Next, we ask ourselves what happens if bit is set in the RFBM and not in
 the xsave state and then what happens if it's set for both.
@@ -341,7 +342,7 @@ The initial register file is actually quite big! The new xsave state
 component bit 18 is called `XTILEDATA` and is 8 KiB because it's 8 tiles
 of 16 rows of 64-bytes each.
 
-Now, recall that with eager FPU which whether it's a good idea or not
+Now, recall that with eager FPU which, whether it's a good idea or not,
 was required to work around speculative execution issues, requires that
 the entire FPU state is saved and restored around each context switch.
 So this is adding a large 8 KiB area to the xsave area, which most folks
@@ -415,8 +416,8 @@ obtaining these states:
   current one in one fell-ish swoop.
 
 * https://illumos.org/man/2/setcontext[`setcontext(2)`] -- This takes
-  the specified context and it makes it the current reality. A function
-  call to setcontext does not return in the conventional sense.
+  the specified context and it makes it the current reality. A successful
+  function call to setcontext does not return in the conventional sense.
 
 These functions all exist for building up a way of performing user-level
 context switching without the kernel being involved in knowing about it.
@@ -457,7 +458,8 @@ struct  ucontext {
 ----
 
 Note, that while the `uc_filler` currently has a comment in the source
-code that suggests seeing the ABI spec, this filler has not been used.
+code that suggests seeing the ABI spec, this filler has not been used,
+though some out-of-gate brands have started using it (see <<sec-lx>>).
 This is an important thing! Let's briefly discuss this structure. The
 `uc_flags` member is used to indicate which other members are actually
 valid and should be honored. There are flags that cover the signal mask,
@@ -502,6 +504,29 @@ differently, this is only valid in the context an initialized structure.
 
 With this understanding of the context structures, let's go and dive
 into everyone's favorite UNIX feature: signals!
+
+[[sec-lx]]
+==== The LX Brand
+
+While we previously said that the `uc_filler[5]` members weren't being
+used that was simultaneously true and false. While it is not in
+illumos-gate right now, the lx brand actually opted to borrow three of
+those entries for itself. Three members were co-opted to transform into
+brand-specific data. In particular it's using its members for:
+
+* Indicating flags that control the interpretation of the signal.
+* An additional stack pointer that is restored to help with Linux
+  semantics.
+* The system call number.
+
+This uses 3 of the 5 entries and doesn't ultimately push us into the
+more extension games that we need to do to take care of this. We will
+construct our fixes in such a way as to not make life needlessly hard
+for the lx brand; however, brand-specific data should in general follow
+the model outlined in our <<rec-uc,ucontext_t specific suggestions>> for
+new architectures. For more background, see
+https://github.com/TritonDataCenter/illumos-joyent/blob/78433503984bc8bd4d4afa318b21e89a8ae816bc/usr/src/uts/common/brand/lx/os/lx_brand.c#L733-L741[lx_savecontext()
+from illumos-joyent].
 
 === Signals in the Dark
 
@@ -694,6 +719,9 @@ We have the following constraints that we need to honor:
 * We must assume that certain applications will assume that they have
   access to all AVX state, including AVX-512, regardless of the size of
   their stacks.
+* We will attempt not to make things too bad for folks who have adopted
+  the current lx brand-specific nature of some of the `ucontext_t`
+  padding.
 
 The following are explicit non-goals of this work (but it is possible
 some of them fall out for free):
@@ -702,6 +730,7 @@ some of them fall out for free):
 * Change the kernel to take advantage of the compressed save format and
   supervisor states.
 * Enhance rtld to leverage the compressed save format.
+* Fix the lx brand to correctly emulate this part of the signal stack.
 
 === System Survey
 
@@ -722,7 +751,7 @@ uncompressed?
 | https://github.com/NetBSD/src/tree/9ebc005c7122f6014596209d153a73cf72895112[NetBSD]
 | https://github.com/openbsd/src/tree/0cffdb45a9bb573ce4665f5540d1a0d50ff2e37f[OpenBSD]
 | Solaris 11.4
-| xsave in signal hander | Yes | Yes | No | Yes | Yes
+| xsave in signal handler | Yes | Yes | No | Yes | Yes
 | Compressed in ucontext_t | No | No | N/A | No | Yes, but no*
 | Kernel uses xsaves | Conditionally | No | No | No | Unknown
 | getcontext xsave | Appears no in glibc, not present in musl | No | No | getcontext() was removed | No
@@ -1039,7 +1068,7 @@ there are a few considerations that we would need to make that may
 eventually lead to us no longer being compatible as while we're playing
 catch up here, we do not want to say that we can't add something because
 they haven't. There are a few other questions that we want to ask
-ourselves in genera with this approach:
+ourselves in general with this approach:
 
 * Do we want to include MPX when we don't support it and it seems in
   general support for MPX is on the decline as it was removed from the
@@ -1068,10 +1097,10 @@ this we will explore the following:
   vector sizes as well as specific, individual registers.
 * Exploring ways in mdb and libproc to update individual FPU registers
   and understand what the largest alias of a register is. This is all in
-  addition to the exisitng bulk put interface that libproc offers.
+  addition to the existing bulk put interface that libproc offers.
 * The existing libproc xregs functions will be re-evaluated due to
   allocation needs that are going to continue to stem here. The existing
-  libproc APIs do not provide the required fleixibility for the
+  libproc APIs do not provide the required flexibility for the
   structure increasing in size for existing consumers.
 
 The exact APIs that will come out of this and user interfaces will be
@@ -1159,6 +1188,7 @@ This section provides several suggestions for how to think about new
 architecture ports that are ongoing or yet to be undertaken and things
 to do to make this process smoother, if possible.
 
+[[rec-uc]]
 UCONTEXT::
 
 * Architectures should ensure that `uc_flags` has free values and that
@@ -1173,7 +1203,7 @@ UCONTEXT::
   x86 there is clear overlap and on ARM SVE overlaps with VFP/Neon.
 ** Where there is no overlap, we suggest that folks build the basic
    stable FPU registers into the normal mcontext and have a variable
-   lenth pointer ala what is described here for the rest of it.
+   length pointer ala what is described here for the rest of it.
 ** On systems where the two states overlap, we suggest only having a
    single save state to avoid the challenge that we have with the
    traditional FPU and the other pieces. What is viable will depend on
@@ -1186,6 +1216,10 @@ UCONTEXT::
   best courses is to focus on the fact that signal handlers can spill
   everything and then to minimize what extended registers are stable
   interfaces until the need is proven otherwise.
+* When making extensions like with brand-specific data, a new flag ala
+  `UC_BRAND` should be added and information should be spilled onto the
+  signal handling stack with a pointer to it being valid when it is
+  present. This reduces the overall consumption of the structure.
 
 SIGNAL STACKS::
 

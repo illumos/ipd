@@ -46,6 +46,8 @@ reflect that.
 * Extend libproc, libc_db, mdb, and related to allow visibility and
   manipulation of the extended FPU state. Investigate variants that take
   care of the underlying structure information.
+* Add new functions to be able to get a fuller `ucontext_t` with
+  `UC_XSAVE`.
 
 == Background
 
@@ -64,7 +66,7 @@ There have been multiple different ways to save and restore the state in
 the FPU. Initially there was the `fsave`/`fnsave` instruction which
 stored it in one format and handled the 80-bit FPU state. This was used
 for a while and became part of the i386 System V ABI (more on that
-later). The structure for this is the the
+later). The structure for this is the
 https://github.com/illumos/illumos-gate/blob/7b5987898994d86cd20e00dbf8c305dfbfbb8bea/usr/src/uts/intel/sys/fp.h#L178-L194[`struct
 fnsave_state`] which looks like:
 
@@ -842,11 +844,83 @@ minimum signal stack size. While we have subsequent proposals for this,
 it does cause us to pause and ask what makes the most sense, especially
 given that most application are not using that extended register set.
 
-This ipd does not constrain what the implementation will be and we allow
-that to be determined based on the experience implementing the various
-pieces and understanding what they look like with a weak bias towards
-the `prxregset_t` if we can manage to make that fit. Regardless of our
-choice, it will be treated and documented as private.
+Our initial choice is to use a custom sparse format so we can reduce the
+signal stack size and maximize the fact that this is private. This also
+simplifies the fact that the fxsave state is duplicated between the
+existing fpregset and the xsave state, allowing us to focus on their
+only being one instance of this, saving another 512 bytes.
+
+==== Extended ucontext_t access
+
+The implementation of `getcontext(2)` assumes that the information in
+the context itself should be totally ignored and will always copy out
+the requisite pieces. This means that there is no good way to get an
+extended state. Regardless of what we want to do we **must** have a new
+symbol.
+
+With that in mind, there are a few considerations here:
+
+1. We observe that we want to keep the `uc_xsave` data format private
+for the time being. This means that knowing the size for this to
+allocate can be tricky.
+2. Folks generally are used to declaring a `ucontext_t` on the stack or
+in some other data structure. We want to ensure that the proper set up
+of a `ucontext_t` is disjoint from the calls to `getcontext()` and
+related.
+
+Surveying other systems, FreeBSD added a function `ucontext_t
+*getcontextx()` which allocates and fills in an extended ucontext_t. It
+allocates the proper `ucontext_t` and then asks you to pass it to free.
+We prototyped a version of this with a variant of this. Unfortunately,
+there is a large challenge in doing this correctly, even if we ignore
+the case of (2). Basically one needs to save the entire FPU state (and
+register state) ahead of calling `malloc`. Given that this variant is
+responsible for allocating, this gets tricky as we can't make any
+promises that a compiler won't use reasonable floating point state in
+say the implementation of libumem or an alternative, interposed malloc.
+
+This leads us to take a different approach here. Before we describe
+that, it's worth asking why are we even considering that, especially
+given that getcontext() was deprecated from POSIX and isn't the most fun
+SVR4-ism and it's easy to envy OpenBSD that struck it entirely.
+Ultimately, there are a few different cases that swayed this:
+
+* Recent issues around things like qemu's coroutine library using this.
+  This really does suggest that we should try to provide access to this
+  extended state.
+* This unlikely to be the last time that this comes up and will become
+  much more problematic with the possibility of needing to work through
+  the implementation details of Intel's CET (control flow execution
+  technology).
+* Brands have already borrowed some members, which we expect will want
+  to transform into external things ala the XSAVE state.
+
+This in turn leads us to propse the following function signatures for
+this:
+
+```
+ucontext_t *ucontext_alloc(uint32_t flags);
+int getcontext_extd(ucontext_t *uctx, uint32_t flags);
+void ucontext_free(ucontext_t *);
+```
+
+This trio of functions allows one to allocate a ucontext_t that is
+suitable for use with `getcontext_extd()` or any of the other existing
+functions. It's worth noting that the existing `swapcontext(2)` is like
+`getcontext(2)` in that it assumes that the passed in context could have
+arbitrary uninitialized memory. The promise of `getcontext_extd()` is
+that the ucontext_t has been zerod and initialized as desired ahead of
+use. This allows one to use a `ucontext_t` that exists elsewhere but
+does not have items set up for the extended elements. Put differently,
+the presence of extended members ala `uc_xsave` being non-zero is what
+keys us into as to what we should get or not.
+
+Right now the `flags` argumen for these would be required to be 0 which
+more or less signifies please get everything. This allows consumers to
+be able to evolve and grow here as we need to without needing an update
+every time a new extension gets added here (hopefully infrequently!).
+However, the `flags` argument does give us the flexibility to do partial
+saves or other variants in the future.
 
 === /proc and xregs
 
@@ -950,40 +1024,32 @@ looks like:
 typedef struct prxregset_info {
 	/*
 	 * Types are semantic types that we define, not necessarily,
-	 * though generally 1:1 mapped to xsave bits.
+	 * though generally 1:1 mapped to xsave bits and to our
+	 * additional entries.
 	 */
-	uint8_t pri_type;
-	uint8_t pri_pad[3];
-	/*
-	 * Example flags include right now:
-	 *   o Entry included, though that could be covered by offset is
-	 *     zero
-	 *   o 64-byte alignment required in compressed
-	 */
+	uint32_t pri_type;
 	uint32_t pri_flags;
 	uint32_t pri_size;
 	uint32_t pri_offset;
 } prxregset_info_t;
 
-typedef struct prxregset {
+typedef struct prxregset_hdr {
 	uint32_t pr_type;
 	uint32_t pr_size;
 	/*
 	 * Flags used to indicate extensions.
 	 */
 	uint32_t pr_flags;
-	uint32_t pr_data_off;
+	uint32_t pr_pad[4];
 	uint32_t pr_ninfo;
 	prxregset_info_t pr_info[];
-} prxregset_t;
+} prxregset_hdr_t;
 ----
 
 Each of the info entries would describe where to find a given state
-component. As the xsave area is required to always have the legacy and
-xsave header, that is what the top-level `pr_data_off` would indicate.
-The top-level `pr_type` would indicate that it is this particular
-version of an xsave style data and `pr_size` would reflect the total
-overall size of the structure.
+component. The top-level `pr_type` would indicate that it is this
+particular version of an xsave style data and `pr_size` would reflect
+the total overall size of the structure.
 
 By including where to find everything and telling applications that that
 is what they should rely upon, it allows us to optionally rearrange and
@@ -997,21 +1063,31 @@ to fill out a component that would have been optimized away in the
 compressed format. This would ultimately look like:
 
 ----
-  +-----
-  | prxregset_t
-  | header
-  +-----
-  +-----
-  | prxregset_info_t []
-  | metadata
-  +----
-  +-----
-  | Padding to 64 bytes
-  +-----
-  +-----
-  | full, uncompressed
-  | xsave structure
-  +-----
+ 0  +-----------------+
+    | prxregset_hdr_t |
+    +-----------------+
+    | Info 0 (XCR)    |-------+
+    +-----------------+       |
+    | Info 1 (XSAVE)  |----------+
+    +-----------------+       |  |
+           ...                |  |
+    +-----------------+       |  |
+    | Info n (Hi ZMM) |-------------+
+    +-----------------+       |  |  |
+    +-----------------+       |  |  |
+    | prxregset_xcr_t |<------+  |  |
+    +-----------------+          |  |
+    +-------------------+        |  |
+    | prxregset_xsave_t |<-------+  |
+    |                   |           |
+    | XMM + xsave       |           |
+    +-------------------+           |
+           ...                      |
+    +---------------------+         |
+    | prxregset_hi_zmm_t  |<--------+
+    |                     |
+    | 1 KiB %zmm16-%zmm31 |
+    +---------------------+
 ----
 
 This does require more user work to parse it (hopefully made easier by
@@ -1034,6 +1110,9 @@ being written to us. That is writing this doesn't have to use or
 leverage the offsets that we have written in. That would allow us in
 theory to write a compressed save state out here and allow someone else
 to write a new compressed state that didn't have this information.
+
+In the initial implementation and testing wring, we have found that this
+approach has worked out reasonably well.
 
 ==== Alternate Approach: Fixed Structures
 
@@ -1079,6 +1158,39 @@ ourselves in general with this approach:
   `IA32_XFD`, and other information required for someone to tell how
   they fit in?
 
+==== Handling fpregs
+
+One of the major questions that we have to consider is what are the
+semantics of writing to the fpregs when we have extended vectors. In
+particular, because `%xmm0` overlaps with `%ymm0` and `%zmm0`, we have
+to ask what should happen to the upper bits when we do a write to the
+`fpregs`. In general, x86 provides two instructions `movd` and `vmovd`
+which preserve and zero contents higher vector respectively when used.
+
+This leaves us with three primary paths that we could take:
+
+1. Preserve the entire contents of the extended FPU (regardless of
+overlap or not).
+2. Zero overlapping components. So we put the %ymm and low %zmm
+components into their initial state, but not the `%kX` opmask or high
+%zmm registers.
+3. We could reset the entire FPU.
+
+Today the kernel actually does none of the above and says I'll use the
+contents of the last time the FPU was saved as a starting point, replace
+the fxsave related state, and that's it. So if the thread in question
+was actively running, its FPU contents would not have been saved and
+would point towards older things (e.g. when it last went off CPU).
+
+Our initial take is to proceed with option (1) and document that. We
+don't really see that (3) makes sense and the semantics of (2) are
+somewhat dubious. While it's true that x86 has moved to the `vmovd`
+style instructions as the preferred ones that support zeroing, this
+would leave the FPU in a weird spot if we didn't reset the entire thing.
+In particular, you might believe that the ZMM state was not in use, but
+the high zmm registers which aren't overlapping components could still
+be.
+
 === libproc and mdb
 
 The libproc design expects a single atomic getting and setting of the
@@ -1103,8 +1215,61 @@ this we will explore the following:
   libproc APIs do not provide the required flexibility for the
   structure increasing in size for existing consumers.
 
-The exact APIs that will come out of this and user interfaces will be
-subject of exploration during development.
+To support mdb, we must update `libthr_db` and `libc_db` as well. While
+libproc is not yet a committed interface, this helps us because the
+default `Plwp_getxregs` and `Plwp_setxregs` interfaces do not have
+sizes. This makes it very hard to allow us to get evolve this. On the
+other hand, the `libthr_db` proc_service APIs are structured in the
+style of the old style ioctl based /proc APIs. While they do not
+actually use this (thankfully) the three basic operations there are a
+get xregs size, get xregs, set xregs. These, however, are committed
+interfaces.
+
+In our prototyping this has led us to do the following:
+
+* As `Plwp_getxregs` and `Plwp_setxregs` were previously SPARC only, we
+  changed the former to allocate the structure based on its size for
+  you. The latter now takes the size of the structure set. A
+  `Plwp_freexregs` was also added.
+* The proc_service style interfaces were not changed. It is assumed (and
+  docs will make clear) that `ps_lgetxregs` arguments are always given a
+  sufficiently sized buffer based on calling that. Though libproc will
+  be preferred.
+* We have added libproc analogues for the `Plwp_getXXX` and
+  `Plwp_setXXX` routines that operate on a specific thread handle and do
+  not require the entire process to be stopped, only the given thread.
+* We have made the libproc routines and others no longer an
+  architecture-specific `#ifdef`. Applications may still get failures
+  when nothing is supported, which we will document.
+* We have generally consolidated the `::fpregs` implementation between
+* i386 and amd64 mdb proc routines. These 
+
+=== Old /procfs APIs
+
+Prior to structured proc, there were a series of ioctls that one could
+issue against files in `/proc` to perform control operations. On x86, in
+particular, the routines related to accessing extended registers always
+returned `EINVAL` because we would indicate no support for them.
+
+The variable sized `prxregset_t` implementation requires some amount of
+copyin surgery to this, which mostly assumed things were a static size.
+While we have added other variable sized structures to /proc, e.g. the
+`PCSCREDX` or `PCSPRIV` commands, these are not present in the older
+deprecated ioctl, API.
+
+These ioctl APIs assume fixed size elements and do not pass their
+request size as part of the ioctl interface. The xregs routines are
+broken into `PIOCGXREGSIZE`, `PIOCGXREG`, and `PIOCSXREG` commands to
+get the size of, get the xregs, and set the xregs respectively. While we
+will attempt to provide support for `PIOCGXREGSIZE` and `PIOCGXREG`, we
+will not implement `PIOCSXREG` support.
+
+The practical impact should be limited. This doesn't impact in-gate
+tooling and such tooling never would have had useful semantics on x86.
+Anything that learns about xregs will need to be updated regardless so I
+do not believe that this is a major impediment. If we want to change
+course at a later time, nothing stops us from adding support for this in
+the future.
 
 === Signal Stack Sizing
 
@@ -1221,9 +1386,39 @@ UCONTEXT::
   signal handling stack with a pointer to it being valid when it is
   present. This reduces the overall consumption of the structure.
 
+PROC::
+
+* The `prxregset_t` should be left opaque and not be a known structure
+  to ensure that we do not have folks assuming a specific size that is
+  valid.
+* Consider maintaining the same perspective as x86 as to not
+  implementing the `PCIOSXREG` ioctl for the old-stye proc interfaces.
+
 SIGNAL STACKS::
 
 * The `MINSIGSTKSZ` and `SIGSTKSZ` should always be their `sysconf`
   based alternates.
 * Applications should always fail if they request too small a signal
   stack.
+
+== Delivery Plans
+
+We plan to implement this in two distinct chunks of work right now. The
+first covers everything other than the signal stack sizing changes that
+we want to make, while the second is that chunk of work. The main reason
+for this is that we want to get impacted things resolved as soon as we
+can, while still giving ourselves observability benefits. The signal
+stack changes are going to require more extensive testing with 3rd party
+software and determining that major run-times are not impacted.
+
+The downside of this approach is that it is possible that some things
+will end up with stack overflows due to their stacks being small.
+However, there are a few silver linings that we think will make this
+less likely in the short term:
+
+* Right now the core illumos libc routines do not support the use of AVX
+  registers. We consider the signal stack sizing work a blocker for
+  further libc improvements.
+* We have architected the signal saving state to only write out what is
+  strictly required to restore. That is, if one is not using a given
+  component, it is not written out.

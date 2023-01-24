@@ -505,7 +505,8 @@ uninitialized stack garbage as part of a call to `getcontext(2)`. Put
 differently, this is only valid in the context an initialized structure.
 
 With this understanding of the context structures, let's go and dive
-into everyone's favorite UNIX feature: signals!
+into everyone's favorite UNIX feature: signals! But first, a brief note
+on the lx brand.
 
 [[sec-lx]]
 ==== The LX Brand
@@ -528,7 +529,9 @@ for the lx brand; however, brand-specific data should in general follow
 the model outlined in our <<rec-uc,ucontext_t specific suggestions>> for
 new architectures. For more background, see
 https://github.com/TritonDataCenter/illumos-joyent/blob/78433503984bc8bd4d4afa318b21e89a8ae816bc/usr/src/uts/common/brand/lx/os/lx_brand.c#L733-L741[lx_savecontext()
-from illumos-joyent].
+from illumos-joyent] and the
+https://github.com/TritonDataCenter/illumos-joyent/blob/78433503984bc8bd4d4afa318b21e89a8ae816bc/usr/src/uts/intel/sys/ucontext.h#L88-L95[illumos-joyent
+ucontext_t definition].
 
 === Signals in the Dark
 
@@ -756,7 +759,8 @@ uncompressed?
 | xsave in signal handler | Yes | Yes | No | Yes | Yes
 | Compressed in ucontext_t | No | No | N/A | No | Yes, but no*
 | Kernel uses xsaves | Conditionally | No | No | No | Unknown
-| getcontext xsave | Appears no in glibc, not present in musl | No | No | getcontext() was removed | No
+| getcontext xsave | Appears no in glibc, not present in musl
+| Yes via `getcontextx()` | No | getcontext() was removed | No
 | Register access
 | Full xsave state via ptrace | Full xsave state via ptrace
 | Full xsave via ptrace and `/proc`
@@ -1228,8 +1232,8 @@ interfaces.
 In our prototyping this has led us to do the following:
 
 * As `Plwp_getxregs` and `Plwp_setxregs` were previously SPARC only, we
-  changed the former to allocate the structure based on its size for
-  you. The latter now takes the size of the structure set. A
+  changed the former to allocate the structure based on its size for the
+  architecture. The latter now takes the size of the structure set. A
   `Plwp_freexregs` was also added.
 * The proc_service style interfaces were not changed. It is assumed (and
   docs will make clear) that `ps_lgetxregs` arguments are always given a
@@ -1242,7 +1246,8 @@ In our prototyping this has led us to do the following:
   architecture-specific `#ifdef`. Applications may still get failures
   when nothing is supported, which we will document.
 * We have generally consolidated the `::fpregs` implementation between
-* i386 and amd64 mdb proc routines. These 
+  i386 and amd64 mdb proc routines. These lead with the vector registers
+  first and have ancillary details later.
 
 === Old /procfs APIs
 

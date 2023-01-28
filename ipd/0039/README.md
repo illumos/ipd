@@ -30,3 +30,4 @@ This IPD exists to coordinate further development of our device tree support and
 - [Raspberry 4 Device Tree Overview](https://blog.stabel.family/raspberry-pi-4-device-tree/)
 - [Fediverse Research Thread](https://chaos.social/@Toasterson/109766721243396979)
 - [ACPI Wikipedia](https://en.wikipedia.org/wiki/ACPI)
+- [DeviceTree.org](https://www.devicetree.org/)

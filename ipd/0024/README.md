@@ -53,3 +53,7 @@ platform.
 * [Multiboot2 Specification](https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html)
 * [IPD 34 Rationalize Kernel Architecture Module Paths](../0034/README.md)
 * [IPD 36 Rationalize $(MACH64) Command Paths](../0036/README.md)
+* [FreeBSD RPi 4 UEFI code](https://github.com/pftf/RPi4)
+* [XNU Boot m1n1](https://github.com/AsahiLinux/m1n1)
+* [m1n1 Guide](https://github.com/AsahiLinux/docs/wiki/m1n1%3AUser-Guide)
+* [Hacking notes](Hacking-notes.md)

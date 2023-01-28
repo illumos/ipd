@@ -32,3 +32,4 @@ This IPD exists to coordinate further development of our device tree support and
 - [ACPI Wikipedia](https://en.wikipedia.org/wiki/ACPI)
 - [DeviceTree.org](https://www.devicetree.org/)
 - [U-Boot Driver Model](https://elinux.org/images/c/c4/Order_at_last_-_U-Boot_driver_model_slides_%282%29.pdf)
+- [Device Tree Specification v0.4-rc1](https://github.com/devicetree-org/devicetree-specification/releases/download/v0.4-rc1/devicetree-specification-v0.4-rc1.pdf)

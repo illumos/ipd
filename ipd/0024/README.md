@@ -30,10 +30,12 @@ to the same conclusions for a subset of issues.
 - userland search paths `/lib/ /usr/lib`
 - `.../lib/64 -> .`
   (see [IPD36](../0036/README.md))
+- plugin-like search paths _XXX UNDECIDED_
 - kernel source paths `aarch64` (isa) `armv8` (platform)
   (aarch64 : armv8 :: intel : i86pc)
 - no legacy backward compatibility pieces (`libm.so.1`, `libresolv.so.1`,
-  `/usr/ucb`)
+  `/usr/ucb`, `/usr/has`)
+- thread-local storage [variant 1](https://www.akkadia.org/drepper/tls.pdf)
 
 ## Boot protocol
 
@@ -53,3 +55,4 @@ platform.
 * [Multiboot2 Specification](https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html)
 * [IPD 34 Rationalize Kernel Architecture Module Paths](../0034/README.md)
 * [IPD 36 Rationalize $(MACH64) Command Paths](../0036/README.md)
+* [ELF Handling For Thread-Local Storage](https://www.akkadia.org/drepper/tls.pdf)

@@ -50,6 +50,7 @@ information is available at the end of this document.
 | draft     | [IPD 36 Rationalize $(MACH64) Command Paths](./ipd/0036/README.md)
 | published | [IPD 37 Vendor-specific Command, Log, and Feature Support in nvmeadm(8)](./ipd/0037/README.md)
 | draft     | [IPD 38 Signal Handling, Extended FPU State, ucontexts, x86, and You](./ipd/0038/README.adoc)
+| predraft  | [IPD 39 Updated Device Tree Support](./ipd/0039/README.md)
 
 ## Contributing
 

@@ -1,0 +1,300 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Andy Fiddaman <illumos@fiddaman.net>
+:source-highlighter: highlight.js
+
+= IPD 3 Link management improvements
+
+--
+Authors: {author}
+
+State: {state}
+--
+
+== Introduction
+
+=== Overview
+
+The illumos https://illumos.org/man/8/dladm[dladm(8)] command manages data links
+(hereafter often referred to as just _links_) including physical devices,
+etherstubs, overlays and VNICs.
+
+In illumos, links are zone-namespaced. That is, a link's fully qualified name
+is made up of two parts:
+
+- its name (that shown by commands such as `dladm`);
+- and the zone in which it currently resides.
+
+In theory this allows link names to overlap as long as the links are in
+different zones; in practice, this feature is not usable due to a number of
+problems.
+
+Zones can also be given privileges to create links directly. Such links do not
+originate in the global zone (GZ) and yet are currently returned to the GZ on
+zone halt. This can result in a name conflict arising unexpectedly, but there
+are other issues too which are explored below.
+
+There are a number of other <<_known_issues>> around link management which
+can cause undesirable behaviour or system panics.
+
+This IPD proposes changes to the implementation that makes link management
+more robust and flexible and would allow overlapping names to be used if
+desired, while preserving support for the different ways in which links are
+currently used in illumos distributions.
+
+=== Terminology
+
+The following are some of the terms used within this document:
+
+link:: A software interface that provides a generic way to access different
+types of physical and virtual network devices. Links can be temporary or
+persistent, an attribute which is selected upon link creation;
+
+link property:: A property of a link. Properties applied to temporary
+links are always temporary, those applied to persistent links can be either
+temporary or persistent. Some properties can only ever be changed temporarily;
+
+temporary:: A temporary link is one which is non-persistent and does not
+survive a system reboot. A temporary property change similarly does not
+survive a reboot, where as a persistent property change does;
+
+on-loan:: A link which is on-loan is owned by the global zone (GZ) but
+currently in use within a non-global zone (NGZ). This is typical for links such
+as VNICs which are loaned to an NGZ while it is running and then returned to
+the GZ.
+
+dls:: The kernel's Data-Link Services Module that performs datalink management
+within the kernel.
+
+dlmgmtd:: The data link management daemon that performs datalink management in
+userspace.
+
+== Link State Structures
+
+Persistent and temporary link state is distributed across a number of places in
+the system, all of which need to be kept in sync.
+
+=== dls
+
+The `dls` module in the kernel tracks each link as a `dls_devnet_t`, which
+contains information such as the link ID, the zone in which the link currently
+resides, the zone which created the link and a reference count to track whether
+the link is in use.
+
+=== dlmgmtd
+
+The `dlmgmtd` process in userland tracks each link as a `dlmgmt_link_t` which
+also includes the link ID and the zone in which the link currently resides.
+However, this structure does not record the zone which created the link but
+rather has an _on-loan_ field that indicates if the link is currently loaned
+out from the GZ.
+
+`dlmgmtd` listens on a door file in each running zone (including the GZ). This
+door is used by the kernel when it needs to communicate with the userland agent
+(such as when activating a link) and by userland utilities such as `dladm`.
+
+```
+# pfiles `pgrep dlmgmtd`
+100056: /sbin/dlmgmtd
+   1: S_IFDOOR mode:0777 dev:518,0 ino:0 uid:0 gid:0 rdev:518,0
+      O_RDWR FD_CLOEXEC  door to dlmgmtd[100056]
+      /zones/test/root/etc/svc/volatile/dladm/dlmgmt_door
+      /etc/svc/volatile/dladm/dlmgmt_door
+```
+
+Information relating to persistent links is stored in a database file at
+`/etc/dladm/datalink.conf` within each zone, relative to the zone root.
+
+Information relating to temporary links is stored in a data file at
+`/etc/svc/volatile/dladm/network-datalink-management:default.cache`; this name
+being constructed from the SMF service name. As for the persistent database,
+there is one of these within each running zone, although if a zone has no links
+of its own then this file will usually not exist.
+
+=== Other
+
+When a link is given to a zone, it is also added to a datalink list within the
+zone's `zone_t` data structure.
+
+Most link modules also keep their own data structures to track links, for
+example the `vnic` module has a global `vnic_hash` modhash.
+
+== Known Issues
+
+=== Name Collisions
+
+Link names can overlap as long as links with the same name are in different
+zones. However, at some point a zone will be halted or rebooted, at which point
+its links are returned to the global zone (GZ). If overlapping link names are
+used on a system, even if care is taken, at some point the GZ will end up with
+two links that have the same name. Currently, this causes the link management
+daemon - `dlmgmtd` - to abort and leave the system in a state where links
+cannot be managed; see https://www.illumos.org/issues/10001[illumos issue
+10001] for more information.
+
+A similar problem arises during link creation in that links are often created
+in the GZ and then handed to a zone during boot. Careful management is required
+to ensure that collisions do not occur at any point during zone life-cycle.
+
+=== Restarting the datalink management daemon (dlmgmtd) does not always result in correct state
+
+When `dlmgmtd` is restarted, as a result of a crash or operator intervention,
+it must re-create its internal state from its various data files across all
+running zones (See <<_dlmgmtd>> above). There are currently situations where
+the state after a restart differs from that before, resulting in a variety of
+errant behaviours. There are particular problems if `dlmgmtd` is restarted
+while a zone is stuck in a downed state since the daemon is unable to read the
+temporary link data from within the zone. This is because that information is
+read from within a sub-process running in the context of the zone (to protect
+against a class of security problems), and this is not possible if the zone is
+in that state.
+
+=== Zones stuck in down state
+
+When a non-global zone is halted, the kernel attempts to return any loaned
+links back to the GZ. If it is unable to communicate with `dlmgmtd`, it will be
+unable to do this. `zoneadmd` also needs to be able to communicate with
+`dlmgmtd` in order to do things such as remove link protection that has been
+applied as part of the zone configuration.
+
+The net result is that if `dlmgmtd` is unavailable or crashes, the zone will
+end up in the `down` state.
+
+```
+zone 'test': datalinks remain in zone after shutdown
+zone 'test': unable to destroy zone
+```
+
+This is often irrecoverable without a system reboot (or poking values directly
+into kernel memory). Restarting `dlmgmtd` and then attempting to halt the zone
+does not usually help, and can even induce a system panic. #Open issue#.
+
+=== Links created within zones
+
+Non-global zones can be given the `sys_dl_config` privilege as part of their
+configuration, after which they are able to create links themselves. These
+links are by definition not on-loan - they belong to the NGZ and have never
+been in the GZ. However, on zone halt, these are currently handed back to the
+GZ and can cause a system panic due to a reference count underflow. This is
+https://www.illumos.org/issues/15167[illumos issue 15167].
+
+Zones with this privilege can create both persistent and temporary links,
+however persistent links do not really persist and do not come back after a
+zone restart.
+
+=== Link Persistence
+
+The persistent link data store, `/etc/dladm/datalink.conf` stores links keyed
+solely on the link name, and the last link to be created wins. This can result
+in scenarios where the system allows conflicting persistent link definitions to
+be stored. For example, consider the following scenario:
+
+1. Create persistent VNIC vnic0 over net0
+2. Boot zone using vnic0
+3. Create persistent VNIC vnic0 over net1
+4. Reboot system
+5. Zone comes up using vnic0 over net1
+
+== Existing Solutions in illumos Distributions
+
+=== SmartOS
+
+SmartOS has made a number of changes in this area to fix some of the issues
+listed above, and to safely allow VNICs to be given the same name within
+non-global zones (typically following a scheme like `net0`, `net1` and so on).
+
+In particular, the concept of a _transient_ link was introduced. In SmartOS, a
+transient link is one which is temporary and has been given to an NGZ. Such
+links are automatically cleaned up when the zone halts instead of been given
+back to the GZ. The other
+https://github.com/TritonDataCenter/illumos-joyent/blob/d0ca2b08e18a06d653279357d3fa022c0e12b0bf/usr/src/lib/brand/jcommon/statechange#L340-L347[piece of this]
+is that VNICs for zones are created in the GZ with a temporary name, moved into
+the zone and then renamed.
+
+SmartOS has also extended a number of the link management tools to support a
+`-z <zone>` parameter which allows them to operate within the context of a
+non-global zone. This is used, for example, to rename a link after it has been
+given to a zone but also allows for the unambiguous selection of a link even if
+the same link name is used within multiple zones.
+
+As part of zone management, SmartOS has also extended the zone configuration
+schema with additional attributes under the `<network/>` tag. These enable
+a zone's network configuration to include the following additional keywords
+which enable zone brands to automatically create the required temporary links
+(that become transient) on zone boot.
+
+- `global-nic`
+- `mac-addr`
+- `vlan-id`
+
+Finally, many of the changes in SmartOS address other bugs related to datalink
+management. In particular there are a number of deadlocks which can be seen in
+the current system if enough zones are started or halted in parallel, and some
+panics that can be triggered when stopping or starting `dlmgmtd` at inopportune
+moments.
+
+=== OmniOS
+
+OmniOS has effectively made all link names globally unique. It is not possible
+to create a link with the same name as another one present on the system even
+if it is in a different zone. This is apparently a temporary change pending a
+better solution and resolves only one of the current issues, that of name
+collisions, but at the expense of more a more flexible environment.
+
+OmniOS has side-pulled the zone configuration schema changes from SmartOS
+as part of porting lx-branded zones.
+
+== Proposal
+
+The following things are proposed in order to resolve the known issues around
+link management:
+
+- Upstream the core `transient link` feature from SmartOS. That is, add a
+  transient flag for links that causes them to be automatically removed when a
+  zone halts;
+
+IMPORTANT: It is **NOT** proposed to automatically assign this flag to any
+	   temporary links given to an NGZ as SmartOS does at the time of
+           writing.
+
+- Disallow the creation of persistent links within a non-global zone. This
+  currently does not work properly and they do not persist. This change does
+  not prevent future work from properly enabling this feature. It may, for
+  example, be useful to be able to pass a persistent VNIC into an NGZ from the
+  GZ, and then to create persistent VLAN interfaces on top of that from within
+  that NGZ;
+
+- When a temporary link is created within a zone, automatically flag this as
+  transient so that it is cleaned up on zone halt rather than any attempt being
+  made to give it to the GZ, where it did not originate;
+
+- Extend the zone virtual platform to recover loaned links from a zone if they
+  have not been automatically returned to the GZ. This is to allow recovery
+  from a stuck down state;
+
+- Upstream the additions to the zone configuration schema from SmartOS;
+
+- Upstream various fixes for deadlocks and kernel panics from SmartOS;
+
+- Extend the `dladm show-*` commands within an additional field that shows the
+  zone in which a link currently resides. SmartOS currently has this feature
+  for VNICs.
+
+- Upstream, from SmartOS, the extensions to `dladm` to allow the `-z` option on
+  more commands, allowing operations to be performed directly on a link within
+  a zone, and to uniquely identify a link even when names are not unique within
+  the system as a whole;
+
+- Other commands such as `flowadm` and `dlstat` should be similarly extended.
+
+NOTE: Where possible, the upstreaming work from SmartOS should be done in a
+      way that is sympathetic to the existing divergent code there. That is,
+      the SmartOS approach and code should be directly taken rather than
+      rewriting it or implementing the same thing in a different way. One of
+      the aims of this work is to reduce the delta between SmartOS, other
+      distributions and illumos-gate in this area.
+

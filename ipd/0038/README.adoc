@@ -651,7 +651,7 @@ more detail. But this is yet another piece of the puzzle.
 
 === /proc and Core File Observability
 
-`/proc` is the main what the debuggers and the system have observability
+`/proc` is the main way that debuggers and the system have observability
 about the state of registers in the system. This shows up in a bunch of
 different places using the types of `prgregset_t` and `prfpregset_t`.
 These structures are basically the exact same as their `mcontext_t`
@@ -919,7 +919,7 @@ does not have items set up for the extended elements. Put differently,
 the presence of extended members ala `uc_xsave` being non-zero is what
 keys us into as to what we should get or not.
 
-Right now the `flags` argumen for these would be required to be 0 which
+Right now the `flags` argument for these would be required to be 0 which
 more or less signifies please get everything. This allows consumers to
 be able to evolve and grow here as we need to without needing an update
 every time a new extension gets added here (hopefully infrequently!).

@@ -2,12 +2,14 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsers: Sponsers: Dan McDonald <danmcd@mnx.io>
 
 = IPD 38 Signal Handling, Extended FPU State, ucontexts, x86, and You
 {authors}
+{sponsers}
 
 As of this writing, illumos does not properly preserve the extended x86
 register state as part of signal handling. This issue is documented in

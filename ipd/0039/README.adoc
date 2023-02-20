@@ -243,6 +243,18 @@ To determine this we need to look at a series of different fields on the
 device. In particular, the media type, whether it thinks it supports
 100-BASET4 or not, and manually put this information together.
 
+=== i40e
+
+The i40e firmware provides us a few different types of information. In
+particular, it has an internal enumeration of PHY types that it uses as
+part of Get Link Status command (opecode 0x0607). This enum called `enum
+i40e_aq_phy_type` tells us very specifi information about what kind of
+phy media is currently in use. In addition, there is also a general
+media type that is part of the phy capabilities data in the  `struct
+i40e_phy_info`. This struct also has an array of which PHYs are
+supported, but for us the most important member is the one in the link
+status.
+
 === ixgbe
 
 To determine the media type for ixgbe(4D), we need to combine the

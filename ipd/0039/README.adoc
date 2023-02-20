@@ -1,0 +1,21 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: published
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+
+= IPD 39 Datalink Media Types
+{authors}
+
+While we often talk about whether a link is up and what it's speed is,
+there is another question that gets asked about: media. While we have
+visibility about discrete, pluggable transceivers that shows up in topo,
+this doesn't always cover the question of what type of media we are
+using. As such, this IPD provides a bit of background and then goes into
+a concrete proposal for how this should be implemented and exposed
+through a combination of user tools and throughout the GLDv3 APIs that
+we have.
+
+== Media Types and Existing Interfaces

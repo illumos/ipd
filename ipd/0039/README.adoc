@@ -21,7 +21,7 @@ we have.
 To summarize this IPD proposes:
 
 * A new dladm link property called `media`.
-* Adds a new enumeration to cover all different media kinds.
+* Adds a new per-mac plugin enumeration to cover all different media kinds.
 * Adds a provision for exposing this through a MAC stat.
 * Adds a provision for exposing this through
   https://illumos.org/man/9E/mac_capab_transceiver[mac_capab_transceiver(9E)].
@@ -88,11 +88,18 @@ the applicability of each is an interesting question.
 
 == Proposal
 
-Fundamentally we propose adding a new enumeration to MAC that is called
-the `link_media_t`. This will be in `<sys/mac.h>` alongside the existing
-properties. Each entry in the enumeration will be a specific type, for
-example: `LINK_MEDIA_10BASE_T`, `LINK_MEDIA_1000BASE_T`,
-`LINK_MEDIA_10GBASE_CR`, `LINK_MEDIA_40GBASE-LR4`, etc. We will have the
+Fundamentally we propose that every MAC plugin add a new enumeration to
+describe the valid types of media. These are plugin-specific as what is
+valid for Ethernet based devices is not true for WiFi, IB, and doesn't
+make sense for some of the other things there. These should all take the
+form of `mac_<plugin>_media_t`. Our focus in this IPD is for Ethernet,
+while other types could be done (and many may be shared with IB), we are
+leaving that to future work.
+
+More specifically we will create the enumeration `mac_ether_media_t` in
+`<sys/mac_ether.h>`. Each entry in the enumeration will be a specific
+type, for example: `ETHER_MEDIA_10BASE_T`, `ETHER_MEDIA_1000BASE_T`,
+`ETHER_MEDIA_10GBASE_CR`, `ETHER_MEDIA_40GBASE_LR4`, etc. We will have the
 lower values of this enumeration match the existing `XCVR_*` constants
 that are in `<sys/mac_provider.h>` to make things easier to adopt for
 existing drivers.
@@ -131,7 +138,9 @@ The most fundamental way that we want to allow someone to express this
 is to have a new `dladm(8)` link property called `media` with the
 corresponding MAC property constant `MAC_PROP_MEDIA`. This is the
 primary way we expect drivers to implement this. See <<sec-a>> for more
-on the driver-specific enabling plan and path.
+on the driver-specific enabling plan and path. Note, while the values
+are plugin-specific our intent is to use the same link property for all
+devices.
 
 The MAC property works well for incremental evolution as drivers already
 have to deal with properties that they don't know about and the `dladm
@@ -145,7 +154,7 @@ As mentioned in the background section, MAC already has a few Ethernet
 statistics around this. In particular, we propose repurposing in a
 backwards-compatible way the `ETHER_STAT_XCVR_INUSE` stat to take a
 fuller range of transceivers. Our advice to drivers would be to place a
-`link_media_t` value in here which will overlap with the traditional
+`mac_ether_media_t` value in here which will overlap with the traditional
 values here.
 
 Just because a driver implements `ETHER_STAT_XCVR_INUSE` does not
@@ -155,7 +164,10 @@ stats.
 The main reason that we opted to use this was that otherwise we'd create
 another Ethernet-specific stat and it'd just be mostly another copy of
 this existing stat, but with additional values. That didn't seem to aid
-anyone.
+anyone. In addition, because we are using a plugin-specific set of
+definitions, we want to have the stat scoped to the plugin. This also
+means that if we say add an IB specific version of this, then it'd
+separately be `IB_STAT_XCVR_INUSE` and accept different values.
 
 === Transceiver Capability
 
@@ -165,14 +177,16 @@ particular, we will add a new function called to set the media in this
 callback which has the signature:
 
 ----
-void mac_transceiver_info_set_media((mac_transceiver_info_t *, link_media_t);
+void mac_transceiver_info_set_media((mac_transceiver_info_t *, uint32_t);
 ----
 
 While this duplicates it, like with the stat interface, this is useful in
 case we do need to support devices where a given transceiver is being
 shared between multiple disparate MACs and therefore it's not always
 something owned by a single instance of a driver where the mac property
-itself may not make sense.
+itself may not make sense. The reason that this takes a `uint32_t` is
+that the transceiver capability is not strictly speaking limited to
+Ethernet devices. IB devices would also support it.
 
 Once present here, this will be plumbed into the existing datalink
 topology and dltrainfo. It will serve as the basis for the <<sec-fut>>

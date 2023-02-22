@@ -2,15 +2,18 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Andy Fiddaman <illumos@fiddaman.net>
+:sponsor: Robert Mustacchi <rm@fingolfin.org>
 :source-highlighter: highlight.js
 
 = IPD 3 Link management improvements
 
 --
 Authors: {author}
+
+Sponsor: {sponsor}
 
 State: {state}
 --
@@ -290,6 +293,10 @@ IMPORTANT: It is **NOT** proposed to automatically assign this flag to any
   the system as a whole;
 
 - Other commands such as `flowadm` and `dlstat` should be similarly extended.
+
+- The kmdb `::dladm` command could be enhanced to know about more than just
+  bridges, and to provide an easy way to inspect links on the live kernel or on
+  a crash dump.
 
 NOTE: Where possible, the upstreaming work from SmartOS should be done in a
       way that is sympathetic to the existing divergent code there. That is,

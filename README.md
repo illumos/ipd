@@ -14,7 +14,7 @@ information is available at the end of this document.
 | --------- | ------------------------------------------------------------- |
 | predraft  | [IPD 1 Virtual Environment for Jenkins Build and Test](./ipd/0001/README.md) |
 | published | [IPD 2 Running smatch for illumos builds](./ipd/0002/README.md) |
-| draft     | [IPD 3 Link management improvements](./ipd/0003/README.adoc) |
+| published | [IPD 3 Link management improvements](./ipd/0003/README.adoc) |
 | published | [IPD 4 Manual Page Section Renumbering](./ipd/0004/README.md) |
 | published | [IPD 5 Rationalize SPARC platform support](./ipd/0005/README.md) |
 | draft     | [IPD 6 allocb(): The `pri` argument, and use of KM_NORMALPRI](./ipd/0006/README.md) |

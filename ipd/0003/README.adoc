@@ -10,13 +10,12 @@
 
 = IPD 3 Link management improvements
 
---
-Authors: {author}
-
-Sponsor: {sponsor}
-
-State: {state}
---
+[cols="1,1,1"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
 
 == Introduction
 

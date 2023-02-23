@@ -9,6 +9,12 @@
 = IPD 39 Datalink Media Types
 {authors}
 
+[cols="2"]
+|===
+|Authors: {author}
+|State: {state}
+|===
+
 While we often talk about whether a link is up and what it's speed is,
 there is another question that gets asked about: media. While we have
 visibility about discrete, pluggable transceivers that shows up in topo,
@@ -135,12 +141,14 @@ just how it is.
 === Link Properties
 
 The most fundamental way that we want to allow someone to express this
-is to have a new `dladm(8)` link property called `media` with the
-corresponding MAC property constant `MAC_PROP_MEDIA`. This is the
+is to have a new `dladm(8)` read-only link property called `media` with
+the corresponding MAC property constant `MAC_PROP_MEDIA`. This is the
 primary way we expect drivers to implement this. See <<sec-a>> for more
 on the driver-specific enabling plan and path. Note, while the values
 are plugin-specific our intent is to use the same link property for all
-devices.
+devices. Drivers will not have to implement the property information for
+this. The mac framework will fill it out itself as is done with other
+properties.
 
 The MAC property works well for incremental evolution as drivers already
 have to deal with properties that they don't know about and the `dladm

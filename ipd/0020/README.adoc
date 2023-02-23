@@ -1,5 +1,5 @@
 :tabsize: 8
-:toc:
+:toc: left
 :toclevels: 5
 
 = IPD 20 Kernel Test Facility
@@ -67,27 +67,32 @@ of ktest. But before going further, it's worth just seeing what running
 
 .run all registered tests
 ----
-rpz@thunderhead:~$ pfexec ktest run '*'
-RESULT MODULE      SUITE           TEST
-PASS   stream      mblk            mblkl_test
-PASS   stream      mblk            msgsize_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_tcp_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
-PASS   mac         dummy           mac_dummy_pass_test
-FAIL   mac         dummy           mac_dummy_fail_test
-ERROR  mac         dummy           mac_dummy_err_test
-SKIP   mac         dummy           mac_dummy_skip_test
+# ktest run '*'
+RESULT LINE  MODULE      SUITE           TEST
+NONE   0     ktest       selftest        ktest_st_none_test
+PASS   24    ktest       selftest        ktest_st_pass_test
+FAIL   36    ktest       selftest        ktest_st_fail_test
+ERROR  66    ktest       selftest        ktest_st_err_test
+SKIP   75    ktest       selftest        ktest_st_skip_test
+ERROR  109   ktest       selftest        ktest_st_mult_result_test
+PASS   247   mac         checksum        mac_sw_cksum_ipv4_tcp_test
+PASS   302   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
+PASS   31    stream      mblk            mblkl_test
+PASS   54    stream      mblk            msgsize_test
 
 
-MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP
-mac                                     6     3     1     1     1
---------------------------------------------------------------------
-  dummy                                 4     1     1     1     1
-  checksum                              2     2     0     0     0
+MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP  NONE
+ktest                                   6     1     1     2     1     1
+--------------------------------------------------------------------------
+  selftest                              6     1     1     2     1     1
 
-stream                                  2     2     0     0     0
---------------------------------------------------------------------
-  mblk                                  2     2     0     0     0
+mac                                     2     2     0     0     0     0
+--------------------------------------------------------------------------
+  checksum                              2     2     0     0     0     0
+
+stream                                  2     2     0     0     0     0
+--------------------------------------------------------------------------
+  mblk                                  2     2     0     0     0     0
 ----
 
 === The Test Triple
@@ -104,20 +109,17 @@ namespace, also known as the "test triple".
 ----
 
 Module:: The top of the namespace, typically named after the
-module-under-test. The convention is to append the `_test` suffix to
-the module-under-test. For example, the `mac` module might have a
-`mac_test` test module. However, there is no hard rule that a test
-module must be named after its module-under-test, it's merely a
-suggestion. Such a convention is a bit unwieldy for mega modules like
-`genunix`. In those cases it makes sense to break from the norm.
+module-under-test. For example, a test module built for testing the
+`mac` module would use `mac` as the module name. However, there is no
+hard rule that a test module must be named after its
+module-under-test, it's merely a suggestion. Such a convention is a
+bit unwieldy for mega modules like `genunix`. In those cases it makes
+sense to break from the norm.
 
 Suite:: Each module consists of one or more suites. A suite groups
 tests of related functionality. For example, you may have several
 tests that verify checksum routines for which you might name the suite
-`checksum`. A suite has optional `init` and `fini` callbacks for
-one-time setup and teardown of shared test state. These are useful if
-some (or all) of the tests require the same context and you want to
-pay the cost of setup and teardown just once.
+`checksum`.
 
 Test:: The name of the test. This can be any string which you find
 descriptive of the test. A unit test for a single, small function will
@@ -166,18 +168,19 @@ The entire point of a test is to convey a result to the user.
 Typically this is a result of pass or fail: pass implies the test ran
 as expected and all conditions were satisfied; fail implies a
 condition was violated. A test may also indicate a result of error or
-skip.
+skip. All functions require a handle to the context and the line
+number from which the result function is being called (by making use
+of the `\\__LINE__` macro).
 
-`ktest_result_pass(ktest_ctx_hdl_t *)`:: The test calls this function to
-indicate that the test ran as expected and all conditions were met.
+`ktest_result_pass(ktest_ctx_hdl_t *, int)`:: Indicates that the test
+ran as expected and all conditions were met.
 
-`ktest_result_fail(ktest_ctx_hdl_t *, const char *, ...)`:: The test calls
-this function to indicate that one of its conditions was violated. The
-test should set the format string and variadic arguments to build a
-helpful message describing which condition failed and why.
+`ktest_result_fail(ktest_ctx_hdl_t *, int, const char *, ...)`::
+Indicates a condition was violated. The test should provide a message
+describing the condition that failed and why it failed.
 
-`ktest_result_error(ktest_ctx_hdl_t *, const char *, ...)`:: This
-result indicates that the test encountered an _unexpected_ error. An
+`ktest_result_error(ktest_ctx_hdl_t *, int, const char *, ...)`::
+Indicates that the test encountered an _unexpected_ error. An
 unexpected error is one that is not directly related to the logic the
 test is trying to exercise. This may be failure to acquire needed
 resources or failure caused by some system not directly related to
@@ -186,53 +189,64 @@ may need to interact with the kernel at large in order to setup the
 context needed for your specific test. Importantly, it's a condition
 which stops the test from making its pass/fail assessment.
 
-`ktest_result_skip(ktest_ctx_hdl_t *, const char *, ...)`:: This result
-indicates that the test lacks the required context to execute. The
+`ktest_result_skip(ktest_ctx_hdl_t *, int, const char *, ...)`::
+Indicates that the test lacks the required context to execute. The
 reasons for skipping will vary, but typically it indicates lack of
 resources or specific hardware needed for the test. This is similar to
 an error result, with the twist that the test preemptively decides it
 cannot run in its current environment.
 
-==== Fail results and ASSERT macros
+==== KTest Result Macros
 
-The API described above, while it works, is not ergonomic: each
-assertion requires an if statement along with a corresponding
-`ktest_result_fail()` call, not to mention the format message and
-arguments. This is silly considering almost all assertions have the
-same structure. Something like the ASSERT3 family of macros is
-preferable. In fact, ktest provides its own variant of the ASSERT3
-macros, but they are different in two major ways.
+The API descirbed above requires repeitive use of the `\\__LINE__`
+macro. The KTest result macros hide this verbosity and are preferred.
 
-1. They don't panic. The point is to report test failure, not preserve
-   system state leading up to an invalid condition.
+* `KT_PASS(ctx)`
+* `KT_FAIL(ktext_ctx_hdt_t *ctx, char *msg, ...)`
+* `KT_ERROR(ktext_ctx_hdt_t *ctx, char *msg, ...)`
+* `KT_SKIP(ktext_ctx_hdt_t *ctx, char *msg, ...)`
 
-2. Following from (1), they will often have test state to cleanup.
-This cleanup needs to happen before triggering the assertion but
-before returning from the test function.
+==== KTest ASSERT Macros
 
-For these two reasons, the ktest ASSERTS have a bit of their own
-flavor to get used to.
+NOTE: I decided to cut the `KT_ASSERTB*` variants from the
+implementation as I found no initial use case for them.
 
-[cols="44%,1%,55%"]
+Even with the help of the `KT_*` macros, writing test assertions
+requires quite a bit of verbosity and boilerplate; requiring an if
+statement, a `KT_*` call, and the failure message arguments. The KTest
+ASSERT macros provide an `ASSERT3`-like family of macros to reduce the
+boilerplate and make test writing feel more natural. However, they are
+different from the `ASSERT3` family in three ways.
+
+1. They all require the additional context argument in order to set
+   the failure result when the assert trips.
+
+2. They do not panic but instead build a failure message, call
+   `ktest_result_fail()`, and cause an immediate return of the test
+   function.
+
+3. The "goto" and "block" variations of these macros provide the
+   ability to cleanup test state instead of returning immediately.
+
+[cols="45%,55%"]
 |===
-|Prototype |Cleanup? |Description
+|Prototype |Description
 
-3+^h|KTest ASSERT
+2+^h|KTest ASSERT
 
-|`KTEST_ASSERT3S(left, op, right, ctx)` +
-`KTEST_ASSERT3U(left, op, right, ctx)` +
-`KTEST_ASSERT3P(left, op, right, ctx)` +
-`KTEST_ASSERT(exp, ctx)` +
-`KTEST_ASSERT0(exp, ctx)` +
+|`KT_ASSERT3S(left, op, right, ctx)` +
+`KT_ASSERT3U(left, op, right, ctx)` +
+`KT_ASSERT3P(left, op, right, ctx)` +
+`KT_ASSERT(exp, ctx)` +
+`KT_ASSERT0(exp, ctx)` +
 
-|No
-|These are the most direct translation from the ASSERT3 family of
- macros. They each take one additional argument, at the end, which
- specifies the context handle passed to the test function. This is
- used by the macro to set the appropriate failure condition inside the
- context object. These macros offer no way to cleanup test resources.
+|The most direct translation of the ASSERT3 family of macros. Each
+ takes an additional argument at the end, specifying the context
+ handle passed to the test function. This is used by the macro to set
+ the appropriate failure condition inside the context object. These
+ macros offer no way to cleanup test resources.
 
-3+^h|KTest ASSERT Goto
+2+^h|KTest ASSERT Goto
 
 |`KT_ASSERT3SG(left, op, right, ctx, label)` +
 `KT_ASSERT3UG(left, op, right, ctx, label)` +
@@ -240,13 +254,12 @@ flavor to get used to.
 `KT_ASSERTG(exp, ctx, label)` +
 `KT_ASSERT0G(exp, ctx, label)` +
 
-|Yes
 |These macros are like the KTest ASSERT macros, but after setting the
  `ctx` they jump to `label`. This allows one to provide a common
  cleanup routine under the guise of a label, which can then be shared
  by multiple asserts.
 
-3+^h|KTest ASSERT Block
+2+^h|KTest ASSERT Block
 
 a|----
 KT_ASSERT3SB(left, op, right, ctx) {
@@ -283,7 +296,6 @@ KT_ASSERT0B(exp, ctx) {
 KT_ASSERTB_END
 ----
 
-|Yes
 |These macros are like the KTest ASSERT macros, but after setting the
  `ctx` they run the code inside the trailing block. The trailing block
  MUST be followed by a `KT_ASSERTB_END`. This is useful for one-off
@@ -291,9 +303,9 @@ KT_ASSERTB_END
  more complicated code.
 |===
 
-Every assert macro listed above also has a corresponding ERROR macro,
-in the form of `*E*ASSERT`. The difference being that these asserts set
-an error result when tripped.
+All macros listed above also have a corresponding KTest ERROR macro,
+in the form of `KT_EASSERT*`. The difference being that these asserts
+set an error result when tripped.
 
 ==== Additional failure context
 
@@ -327,11 +339,11 @@ ktest_msg_clear(ctx);
 
 A test has the option to require input. The input is always in the
 form of a byte stream. The interpretation of those bytes is left to
-the test; the ktest facility at large treats the input stream as
-opaque. It is legal to have an input stream of zero bytes.
+the test. The ktest facility treats the input stream as opaque with
+the exception of requiring that it be at least one byte in length.
 
 A user specifies an input stream by way of a path on the local
-filesystem. The `ktest(1M)` command will attempt to read this file in
+filesystem. The `ktest(8)` command will attempt to read this file in
 its entirety and pass the byte stream into the ktest kernel module.
 Ktest provides an API for the test to get a pointer to the byte
 stream, along with its length.
@@ -398,13 +410,13 @@ mac_sw_cksum_ipv4_tcp_test(ktest_ctx_hdl_t *ctx)
 	<... snip ...>
 
 	if (ktest_hold_mod("mac", &hdl) != 0) {
-		ktest_result_error(ctx, "failed to hold 'mac' module");
+		KT_ERROR(ctx, "failed to hold 'mac' module");
 		return;
 	}
 
 	if (ktest_get_fn(hdl, "mac_sw_cksum_ipv4",
 	   (void **)&mac_sw_cksum_ipv4) != 0) {
-		ktest_result_error(ctx, "failed to resolve symbol %s`%s",
+		KT_ERROR(ctx, "failed to resolve symbol %s`%s",
 		    "mac", "mac_sw_cksum_ipv4");
 		goto cleanup;
 	}
@@ -416,8 +428,9 @@ mac_sw_cksum_ipv4_tcp_test(ktest_ctx_hdl_t *ctx)
 	<... snip ...>
 
 cleanup:
-	if (hdl != NULL)
+	if (hdl != NULL) {
 		ktest_release_mod(hdl);
+	}
 
 	<... snip ...>
 }
@@ -478,12 +491,13 @@ linkage and perform test registration/deregistration in their
 typically live adjacent to its module-under-test in the `usr/src/uts`
 tree. The source file and binary should generally use the name
 `<module-under-test>_test`. You should deviate from this rule when the
-module covers many subsystems and breaking it up would add clarity.
-For example, the mblk routines in the "STREAMS subsystem" are part of
-`genunix`. But `genunix` covers a lot of ground, and `genunix_test.c`
-would be a pretty big source file. It makes more sense to create a
-`stream_test.c` next to the `stream.c` file and create a `stream_test`
-module that exercises the various stream APIs in `genunix`.
+module-under-test covers many subsystems and having multiple test
+modules would add clarity. For example, the mblk routines in the
+"STREAMS subsystem" are part of `genunix`. But `genunix` covers a lot
+of ground, and `genunix_test.c` would be a pretty big source file. It
+makes more sense to create a `stream_test.c` next to the `stream.c`
+file and create a `stream_test` module that exercises the various
+stream APIs in `genunix`.
 
 Test modules, like system libraries, should come welded to the system
 -- the source code for the test module should live in illumos-gate.
@@ -493,48 +507,56 @@ functionality (though in that case it should be in their downstream
 gate).
 
 Delivering test modules is a choice left to each downstream
-distribution. That said, we must make a default decision about how to
-structure the IPS manifests in gate. First, it seems to make sense to
-at least give the ktest facility its own package, which includes only
-the means to register, list, and execute tests, but does not deliver
-any tests itself. Things get more interesting when determining how
-test modules should be delivered. The following is a table of
-potential options and their trade-offs.
+distribution. That said, we must decide how to structure the IPS
+manifests in gate. First, it makes sense to give the ktest facility
+its own package. This package should include the driver, the
+`ktest(8)` command, public header files, and relevant man pages.
+Things get more interesting when determining how test modules should
+be delivered. The following is a table of potential options and their
+trade-offs.
 
 |===
 |Delivery| Trade-offs
 
-|1. All in-gate tests delivered in ktest package. Deliver all in-gate
- test modules as part of the ktest package.
+|1. All in-gate tests delivered in ktest package.
 a|* One package gives you everything.
 * No test modules delivered unless you absolutely want them.
 * Delivers test modules for modules that may not be attached and that
 have no relevance to your system .
 
-|2. Each test module is delivered with whatever package delivers the
- module-under-test. Each package which delivers a test module has a
- dependency on ktest facility package.
-a|* Only the necessary test
- modules are installed.
-* Probably makes the most logical sense.
+|2. The test module is delivered with same package that delivers the
+ module-under-test and its package depends on the ktest package.
+a|* Only the necessary test modules are installed.
 * Given that at least one module-under-test is part of the main kernel
   (like genunix), this effectively means ktest is always delivered.
 
 |3. Same as previous, but don't require ktest dependency.
-a|* Same benefits as above, but test execution can only happen if the
-user decides to also install ktest. Otherwise the test modules lay
-dormant on the filesystem (not loaded).
+a|* Same benefits as above.
+* The ktest package is only installed if the user requests it.
+* Tests are installed even when there is no means to run them.
 
+|4. Same as previous, but add a `ktest` facet for the test modules.
+a|* Same benefits as above.
+* Tests are installed only when the user explicitly enables the
+  `ktest` facet.
+
+|5. A mix of all of the above. Deliver "core" test modules with the
+ ktest package. Deliver "non-core" test modules with the
+ module-under-test's package and only if the `ktest` facet is enabled.
+ a|* One package gives you all core tests.
+* No package depends on ktest.
+* Installing non-core test modules requires additional opt-in via
+  `ktest` facet.
 |===
 
-I think we should go with option (3). We should deliver test-modules
-with their module-under-test, but only load/run them when the ktest
-facility is installed (and even then they would not be loaded until
-the user specifically requests that one or more test-modules be
-loaded). Furthermore, all test modules will be given the facet tag
-`facet.optional.ktest`. This will prevent any ktest test modules, and
-related files, from being installed by default. To install them a user
-can opt-in via `pkg change-facet optional.ktest=true`.
+Originally I wanted to go with option (3), but after some more thought
+I think we should go with option (5). We deliver "core" test modules
+(core modules are ones that are always installed regardless of
+platform) as part of the ktest package and "non-core" test modules are
+delivered via the same package as the module-under-test. This prevents
+us from delivering test modules for modules that don't exist on the
+system. Furthermore, installing non-core test modules requires an
+additional opt-in via the `ktest` facet.
 
 As these test modules are misc-type modules, they are delivered in the
 `misc` module directory. However, in order not to pollute the `misc/`
@@ -545,9 +567,9 @@ directory, they are placed in their own `ktest/` subdirectory.
 /usr/kernel/misc/ktest/amd64
 ----
 
-=== ktest(1M)
+=== ktest(8)
 
-The `ktest(1M)` command controls all interactions between the user and
+The `ktest(8)` command controls all interactions between the user and
 ktest facility, as well as all interactions between the test modules
 and ktest facility. That is, unless done through some other means like
 `modload`, all test module loading, unloading, listing, and running
@@ -560,22 +582,29 @@ also use it as a health check for a production system during
 pre-flight. For that reason the ktest device does not allow arbitrary
 users to access it given it's essentially a vector to execute
 arbitrary code you want in the kernel (much like any use of
-`add_drv(1M)` or `modload(1M)`).
+`add_drv(8)` or `modload(8)`).
 
 .ktest usage
 ----
-$ pfexec ktest [global_opts] cmd [cmd_opts] [operands]
+# ktest <subcommand> [cmd_opts] [args]
 ----
 
-.global options
+.common options
 |===
 |Option| Description
+
+a|`-H`
+a|Elide the column headers.
 
 a|`-o`
 a|Select the fields you wish to output.
 
 a|`-p`
-a|Write output in "parsable" format.
+a|Write output in a machine-friendly parsable format where each column
+is separated by a colon (`:`) character. The `-o` option is required
+with this option in order to protect against potential future field
+additions or output reordering. The idea is to use the `-Hpo
+field,...` options when scripting ktest.
 
 |===
 
@@ -585,7 +614,7 @@ a|Write output in "parsable" format.
 ====
 After several false starts around test module listing/loading, I
 realized that it's not something that ktest should implement. This is
-a job best left to `modload(1M)` and friends.
+a job best left to `modload(8)` and friends.
 ====
 
 ==== Listing Tests
@@ -595,20 +624,25 @@ be specified to narrow the listing.
 
 .ktest list usage
 ----
-ktest [-o fields] [-p] list [triple]...
+ktest list [-H] [[-p] -o field[,...]] [triple]...
+----
 
-rpz@thunderhead:~$ pfexec ktest list
+.list all tests
+----
+# ktest list
 MODULE      SUITE           TEST                                         INPUT
-stream      mblk            mblkl_test                                   N
-stream      mblk            msgsize_test                                 N
+ktest       selftest        ktest_st_none_test                           N
+ktest       selftest        ktest_st_pass_test                           N
+ktest       selftest        ktest_st_fail_test                           N
+ktest       selftest        ktest_st_err_test                            N
+ktest       selftest        ktest_st_skip_test                           N
+ktest       selftest        ktest_st_input_test                          Y
+ktest       selftest        ktest_st_mult_result_test                    N
 mac         checksum        mac_sw_cksum_ipv4_tcp_test                   N
 mac         checksum        mac_sw_cksum_ipv4_bad_proto_test             N
 mac         checksum        mac_sw_cksum_ipv4_snoop_test                 Y
-mac         dummy           mac_dummy_pass_test                          N
-mac         dummy           mac_dummy_fail_test                          N
-mac         dummy           mac_dummy_err_test                           N
-mac         dummy           mac_dummy_skip_test                          N
-mac         dummy           mac_dummy_input_test                         Y
+stream      mblk            mblkl_test                                   N
+stream      mblk            msgsize_test                                 N
 ----
 
 ==== Running Tests
@@ -617,8 +651,17 @@ The `run` command executes registered tests and reports their results.
 
 .ktest run usage
 ----
-ktest [-o fields] [-p] run [-N] [-i input ] [-f runfile|'-'] triple...
+ktest run [-H] [[-p] -o field[,...]] [-i input] triple...
 ----
+
+.run options
+|===
+|Option| Description
+
+a|`-i <input stream file>`
+a|Specify the file to act as the input stream for all tests requiring input.
+
+|===
 
 The simplest thing you can do is run all registered tests. Unlike the
 `list` command, the `run` command does not assume you want to run all
@@ -626,116 +669,125 @@ tests if given no input. Rather, it always requires an explicit input
 to avoid the accidentally running of all tests. But running all tests
 is still easy enough, just pass the `*` triple.
 
-.ktest run all tests
+.run all tests
 ----
-rpz@thunderhead:~$ pfexec ktest run '*'
-RESULT MODULE      SUITE           TEST
-PASS   stream      mblk            mblkl_test
-PASS   stream      mblk            msgsize_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_tcp_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
-PASS   mac         dummy           mac_dummy_pass_test
-FAIL   mac         dummy           mac_dummy_fail_test
-ERROR  mac         dummy           mac_dummy_err_test
-SKIP   mac         dummy           mac_dummy_skip_test
+# ktest run '*'
+RESULT LINE  MODULE      SUITE           TEST
+NONE   0     ktest       selftest        ktest_st_none_test
+PASS   24    ktest       selftest        ktest_st_pass_test
+FAIL   36    ktest       selftest        ktest_st_fail_test
+ERROR  66    ktest       selftest        ktest_st_err_test
+SKIP   75    ktest       selftest        ktest_st_skip_test
+ERROR  109   ktest       selftest        ktest_st_mult_result_test
+PASS   247   mac         checksum        mac_sw_cksum_ipv4_tcp_test
+PASS   302   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
+PASS   31    stream      mblk            mblkl_test
+PASS   54    stream      mblk            msgsize_test
 
 
-MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP
-mac                                     6     3     1     1     1
---------------------------------------------------------------------
-  dummy                                 4     1     1     1     1
-  checksum                              2     2     0     0     0
+MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP  NONE
+ktest                                   6     1     1     2     1     1
+--------------------------------------------------------------------------
+  selftest                              6     1     1     2     1     1
 
-stream                                  2     2     0     0     0
---------------------------------------------------------------------
-  mblk                                  2     2     0     0     0
+mac                                     2     2     0     0     0     0
+--------------------------------------------------------------------------
+  checksum                              2     2     0     0     0     0
+
+stream                                  2     2     0     0     0     0
+--------------------------------------------------------------------------
+  mblk                                  2     2     0     0     0     0
 ----
 
 To run a single test which requires an input stream you can use the
-`-i` option. This example also demonstrates the `-N` option, which
-tells `run` to elide the stats report.
+`-i` option.
 
-.ktest run pass input
+.pass input to single test
 ----
-rpz@thunderhead:~$ pfexec ktest -o run -Ni /var/tmp/browsing.snoop mac:checksum:mac_sw_cksum_ipv4_snoop_test
-RESULT MODULE      SUITE           TEST
-PASS   mac         checksum        mac_sw_cksum_ipv4_snoop_test
-----
-
-Furthermore, you can pass the same input to multiple tests by using a
-partially-qualified triple.
-
-.ktest run pass same input to many tests
-----
-rpz@thunderhead:~$ pfexec ktest run -i /var/tmp/browsing.snoop mac:
-RESULT MODULE      SUITE           TEST
-PASS   mac         checksum        mac_sw_cksum_ipv4_tcp_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
-PASS   mac         checksum        mac_sw_cksum_ipv4_snoop_test
-PASS   mac         dummy           mac_dummy_pass_test
-FAIL   mac         dummy           mac_dummy_fail_test
-ERROR  mac         dummy           mac_dummy_err_test
-SKIP   mac         dummy           mac_dummy_skip_test
-PASS   mac         dummy           mac_dummy_input_test
+# ./ktest run -i ~/ssh.pcap mac:checksum:mac_sw_cksum_ipv4_snoop_test
+RESULT LINE  MODULE      SUITE           TEST
+PASS   627   mac         checksum        mac_sw_cksum_ipv4_snoop_test
 
 
-MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP
-mac                                     8     5     1     1     1
---------------------------------------------------------------------
-  dummy                                 5     2     1     1     1
-  checksum                              3     3     0     0     0
+MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP  NONE
+mac                                     1     1     0     0     0     0
+--------------------------------------------------------------------------
+  checksum                              1     1     0     0     0     0
 ----
 
-Here we pass the `browsing.snoop` stream to any test which matches the
-`mac:` triple _and_ requires input. Any test which matches but _does
-not_ require input simply runs as normal. This option is most useful
-if you have a suite with many tests that verify different variations
-against the same input.
+If the specified triple(s) match more than one test, then
+all tests requiring input are passed the same input stream.
 
-If we want to know why a test is failing we can make sure to add the
-`reason` column to the output.
+.pass the same input to multiple tests
+----
+# ktest run -i ~/ssh.pcap mac: ktest:
+RESULT LINE  MODULE      SUITE           TEST
+NONE   0     ktest       selftest        ktest_st_none_test
+PASS   24    ktest       selftest        ktest_st_pass_test
+FAIL   36    ktest       selftest        ktest_st_fail_test
+ERROR  66    ktest       selftest        ktest_st_err_test
+SKIP   75    ktest       selftest        ktest_st_skip_test
+PASS   98    ktest       selftest        ktest_st_input_test
+ERROR  109   ktest       selftest        ktest_st_mult_result_test
+PASS   247   mac         checksum        mac_sw_cksum_ipv4_tcp_test
+PASS   302   mac         checksum        mac_sw_cksum_ipv4_bad_proto_test
+PASS   627   mac         checksum        mac_sw_cksum_ipv4_snoop_test
+
+
+MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP  NONE
+ktest                                   7     2     1     2     1     1
+--------------------------------------------------------------------------
+  selftest                              7     2     1     2     1     1
+
+mac                                     3     3     0     0     0     0
+--------------------------------------------------------------------------
+  checksum                              3     3     0     0     0     0
+----
+
+Here we pass the `ssh.pcap` stream to any test matching the `mac:` or
+`ktest:` triple that requires input. A matching test that _does not_
+require input runs as normal. This option is useful when you have a
+suite of tests that verify different aspects of a system against the
+same input.
+
+Sometimes the line number alone is not enough to determine why an
+assertion failed. In those cases you can use the `-o` option to add
+the `reason` field to the output.
 
 .ktest run failure reason
 ----
-rpz@thunderhead:~$ pfexec ktest -o result,test,input,reason run -Ni /var/tmp/browsing.snoop mac:dummy:
-RESULT TEST                                         INPUT                                           REASON
-PASS   mac_dummy_pass_test                          --                                              --
-FAIL   mac_dummy_fail_test                          --                                              mt_dummy(5) == 0 (0x1 == 0x0) (../../common/io/mac/mac_test.c:40)
-ERROR  mac_dummy_err_test                           --                                              mt_dummy(3) != 0 (0x1 != 0x0) (../../common/io/mac/mac_test.c:47)
-SKIP   mac_dummy_skip_test                          --                                              The king stay the king.
-PASS   mac_dummy_input_test                         /var/tmp/browsing.snoop                         --
+# ktest run -o result,line,module,suite,test,reason ktest:
+RESULT LINE  MODULE      SUITE           TEST                                         REASON
+NONE   0     ktest       selftest        ktest_st_none_test                           --
+PASS   24    ktest       selftest        ktest_st_pass_test                           --
+FAIL   36    ktest       selftest        ktest_st_fail_test                           ktest_st_is_even(5) == B_TRUE (0x0 == 0x1)
+ERROR  66    ktest       selftest        ktest_st_err_test                            ktest_st_pretend_func(7) == 0 (0xffffffffffffffff == 0x0)
+SKIP   75    ktest       selftest        ktest_st_skip_test                           This test should be skipped.
+ERROR  109   ktest       selftest        ktest_st_mult_result_test                    multiple results: prev result at line 108
+
+
+MODULE/SUITE                            TOTAL PASS  FAIL  ERR   SKIP  NONE
+ktest                                   6     1     1     2     1     1
+--------------------------------------------------------------------------
+  selftest                              6     1     1     2     1     1
 ----
 
-However, this can get a bit unwieldy, and asking ktest to print in
-parsable mode might help.
+When scripting ktest runs you may want to use the `-Hpo` set of
+options to output a stable, machine-friendly, parsable output.
 
-.ktest run failure reason parsable mode
+.ktest run in "parsable" mode
 ----
-rpz@thunderhead:~$ pfexec ktest -po result,test,input,reason run -Ni /var/tmp/browsing.snoop mac:dummy:
-PASS:mac_dummy_pass_test::
-FAIL:mac_dummy_fail_test::mt_dummy(5) == 0 (0x1 == 0x0) (../../common/io/mac/mac_test.c\:40)
-ERROR:mac_dummy_err_test::mt_dummy(3) != 0 (0x1 != 0x0) (../../common/io/mac/mac_test.c\:47)
-SKIP:mac_dummy_skip_test::The king stay the king.
-PASS:mac_dummy_input_test:/var/tmp/browsing.snoop:
+# ktest run -Hpo result,line,module,suite,test,input,reason -i ~/one.txt ktest:
+NONE:0:ktest:selftest:ktest_st_none_test::
+PASS:24:ktest:selftest:ktest_st_pass_test::
+FAIL:36:ktest:selftest:ktest_st_fail_test::ktest_st_is_even(5) == B_TRUE (0x0 == 0x1)
+ERROR:66:ktest:selftest:ktest_st_err_test::ktest_st_pretend_func(7) == 0 (0xffffffffffffffff == 0x0)
+SKIP:75:ktest:selftest:ktest_st_skip_test::This test should be skipped.
+ERROR:90:ktest:selftest:ktest_st_input_test:/export/home/rpz/one.txt:expected 4 or more bytes, got 2
+ERROR:109:ktest:selftest:ktest_st_mult_result_test::multiple results\: prev result at line 108
 ----
 
-.run options
-|===
-|Option| Description
-
-a|`-f <runfile>`
-a|Specify a runfile. The `-` character may be used to indicate stdin.
-
-
-a|`-i <input stream file>`
-a|Specify a file to act as the input stream for all tests requiring input.
-
-a|`-N`
-a|Elide the statistics output at the end of the run.
-
-|===
-
-==== ktest and `usr/src/test`
+==== automating ktest and `usr/src/test`
 
 [NOTE]
 ====
@@ -753,14 +805,15 @@ two systems is totally doable, it will not be part of the initial
 ktest commit.
 ====
 
-The `run` command provides interactive support, but its real use is
-going to come from integration with `usr/src/test` -- using test
-scripts in `usr/src/test` to drive the ktest test modules. This is
-where the `-f runfile` option comes.
-
-The ktest runfile is very similar to the `run` command, except that
-the triples are specified in a file, and each triple, partially or
-fully-qualified, may be paired with its own input file.
+The `ktest run` command is good for interactive testing, but it's also
+vital for ktest to provide good scripting support for automation of
+testing and integration with other facilities like `usr/src/test`.
+This is where the ktest `run-file` command comes into play. The
+`run-file` command uses a file to drive the test runner. Each line of
+the file specifies one triple, partially or fully-qualified, along
+with an optional input file to attach to all tests that match that
+triple. The triple and optional input file must be separated by a
+whitespace character.
 
 .runfile example
 ----
@@ -769,12 +822,15 @@ mac:checksum:mac_sw_cksum_ipv4_snoop_test /var/tmp/browsing.snoop
 stream:
 ----
 
-Given this file we can then run the following.
+Given this file we can execute `ktest` in the following manner in our
+script.
 
 ----
-$ pfexec ktest run -f /var/tmp/example.run
+pfexec ktest run-file -Hpo result,line,module,suite,test,input,reason ~/run-file.txt
 ----
 
+If any test produces an error that is not one of `PASS` or `SKIP`,
+then `ktest(8)` returns an exit code of 1 to indicate test failure.
 
 == Related Work
 
@@ -838,7 +894,7 @@ no reason both can't exist.
 
 The simnet device provides a pseudo mac device (also known as a mac
 provider). This is a device that implements the mac(9E) interface but
-is purely virtual and allows user configuration via the `dladm(1M)`
+is purely virtual and allows user configuration via the `dladm(8)`
 command. This is a very powerful device when combined with bridges, IP
 routing, and zones, because it allows full emulating of an arbitrary
 network on one host. However, this is obviously a very specialized
@@ -858,7 +914,7 @@ protocols react to such a network. Once again, this is a specialized
 testing tool which is complementary to ktest.
 
 To find out more see Robert's lovely big-theory statement on ipd
-<<ipd-theory>> and see the ipdadm(1M) man page <<ipdadm>>.
+<<ipd-theory>> and see the ipdadm(8) man page <<ipdadm>>.
 
 === pshot: Pseudo Bus Nexus Driver
 
@@ -886,4 +942,4 @@ should have its own.
 * resurrect-simnet[[resurrect-simnet]]: https://zinascii.com/2019/resurrecting-simnet.html
 * simnet-basics[[simnet-basics]]: https://zinascii.com/2019/simnet-basics.html
 * ipd-theory[[ipd-theory]]: https://github.com/illumos/illumos-gate/blob/master/usr/src/uts/common/inet/ipd/ipd.c#L16
-* ipadm[[ipadm]]: https://illumos.org/man/1m/ipdadm
+* ipadm[[ipadm]]: https://illumos.org/man/8/ipdadm

@@ -270,7 +270,7 @@ device. In particular, the media type, whether it thinks it supports
 The i40e firmware provides us a few different types of information. In
 particular, it has an internal enumeration of PHY types that it uses as
 part of Get Link Status command (opecode 0x0607). This enum called `enum
-i40e_aq_phy_type` tells us very specifi information about what kind of
+i40e_aq_phy_type` tells us very specific information about what kind of
 phy media is currently in use. In addition, there is also a general
 media type that is part of the phy capabilities data in the  `struct
 i40e_phy_info`. This struct also has an array of which PHYs are
@@ -289,7 +289,7 @@ combining these two we can get the current mode of the link.
 The mlxcx(4D) driver already has a notion of this with the
 `mlxcx_eth_proto_t` enumeration which contains the current operational
 mode in the port's `mlp_oper_proto` member. All we need to do is convert
-this to the appropriate general type..
+this to the appropriate general type.
 
 === qede
 

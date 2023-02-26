@@ -179,30 +179,18 @@ separately be `IB_STAT_XCVR_INUSE` and accept different values.
 
 === Transceiver Capability
 
-We think this should be added to the information that can be set in the
-https://illumos.org/man/9E/mct_info[mct_info(9E)] entry point. In
-particular, we will add a new function called to set the media in this
-callback which has the signature:
-
-----
-void mac_transceiver_info_set_media((mac_transceiver_info_t *, uint32_t);
-----
-
-While this duplicates it, like with the stat interface, this is useful in
-case we do need to support devices where a given transceiver is being
-shared between multiple disparate MACs and therefore it's not always
-something owned by a single instance of a driver where the mac property
-itself may not make sense. The reason that this takes a `uint32_t` is
-that the transceiver capability is not strictly speaking limited to
-Ethernet devices. IB devices would also support it.
-
-Once present here, this will be plumbed into the existing datalink
-topology and dltrainfo. It will serve as the basis for the <<sec-fut>>
-discussed below.
+Originally we proposed adding an extension to the MAC transceiver
+capability. However, as we dug into the implementation, it become less
+desirable at this time and we have moved it to future work. In
+particular, most implementations of `MAC_CAPAB_TRANSCEIVER` are specific
+to the presence of extrenal SFP-style PHYs. As such, plumbing this
+through in a subset of circumstnaces isn't particularly useful. Our
+prototype of adding this to the topo datalink property groups worked
+just fine wih the link property. 
 
 == Implementation Plan
 
-To implement this, we will to an initial integration of the mac features
+To implement this, we will do an initial integration of the mac features
 along with a few drivers. Additional drivers will be integrated in
 subsequent changes in part based on needs and testing capabilities.
 
@@ -219,7 +207,9 @@ information proposed here, the information from the transceiver
 capability, and make it a first class dladm-level experience. If we go
 down this path then we'll also want to add an additional property to the
 transceiver mct_info(9E) entry point that indicates whether the
-transceiver is built-in or not.
+transceiver is built-in or not. If we do this, we should consider what
+the implementation for drivers without external SFP-style PHYs looks
+like as most do not implement `MAC_CAPAB_TRANSCIEVER` otherwise.
 
 A different direction that we should consider is potentially introducing
 an array of supported media. This isn't a priority here because the link
@@ -298,6 +288,16 @@ particular there is a function `ecore_mcp_get_media_type()` which is
 used to extract from firmware the `struct public_port` member
 `media_type`. This gives us something we can then comare with the speed
 to figure out the exact type of.
+
+=== sfxge
+
+The sfxge(4D) driver does have a way of asking the underlying system
+what the type of the port is. However, this only gets us to high-level
+PHY information such as BASE-T, SFP, XPF, QSFP, etc. Unlike other
+drivers or other systems it does not attempt to decode the SFP
+compliance codes to figure out how to operate (that we can easily see).
+This means that we will have to return an unknown media type in such
+circumstances.
 
 === mii-framework based drivers
 

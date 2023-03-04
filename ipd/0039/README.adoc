@@ -5,13 +5,15 @@
 :state: draft
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor: Rich Lowe <richlowe@richlowe.net>
 
 = IPD 39 Datalink Media Types
 {authors}
 
-[cols="2"]
+[cols="3"]
 |===
 |Authors: {author}
+|Sponsor: {sponsor}
 |State: {state}
 |===
 

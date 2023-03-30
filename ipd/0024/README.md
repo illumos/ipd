@@ -25,16 +25,18 @@ to the same conclusions for a subset of issues.
 - platform (`uname -p`) aarch64
 - machine (`uname -m`) armv8
 - implementation (`uname -i`) per-target board/system/platform
-- kernel search paths `/kernel/.../aarch64` as on other platforms
-  (see [IPD34](../0034/README.md))
-- userland search paths `/lib/ /usr/lib`
-- `.../lib/64 -> .`
+- root nexus name is taken from the implementation as on SPARC and on i86pc/i86xpv.
+- kernel search paths `/kernel/.../aarch64`, keeping the ISA directory as on
+  other platforms (see [IPD34](../0034/README.md))
+- userland search paths `/lib/ /usr/lib`, no ISA directory
+- `.../lib/64 -> .`, compatibility for things which use /64/ in runpaths, etc.
   (see [IPD36](../0036/README.md))
-- plugin-like search paths _XXX UNDECIDED_
+- plugin-like search paths, no ISA directories (with the exception that mdb
+  keeps them, again, to look more like the other platforms)
 - kernel source paths `aarch64` (isa) `armv8` (platform)
   (aarch64 : armv8 :: intel : i86pc)
 - no legacy backward compatibility pieces (`libm.so.1`, `libresolv.so.1`,
-  `/usr/ucb`, `/usr/has`)
+  `/usr/ucb`, `/usr/has`, etc.)
 - thread-local storage [variant 1](https://www.akkadia.org/drepper/tls.pdf)
 
 ## Boot protocol

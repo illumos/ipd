@@ -1,0 +1,225 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor: 
+
+= IPD 41 Improving PCI devinfo Naming and Future Platforms
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+https://github.com/illumos/ipd/blob/master/ipd/0009/README.md[IPD 9 PCI
+Alias Disambiguation] laid out the path for what we should do to try to
+solve a thorny ID problem. However there are two additional things that
+we need to deal with:
+
+1. Type 1 PCI devices do not have subsystems in place as part of their
+compatible properties.
+2. What should the set of PCI aliases, node names, and compatible
+properties be for future platforms and how do we best harmonize this
+with what x86 has done today.
+
+We have subsystem IDs for everything today other than bridges. While
+attempting to put together a fix for issues like
+https://www.illumos.org/issues/15587[15587 PCI bridge subsystem IDs are
+ignored], the history and nuance made this a little bit trickier and
+means that some of the straightforward paths are not options. This
+IPD suggests what the path forward on x86 should be and then concludes
+with what should be done on new platforms. 
+
+== Summary of Proposed Changes
+
+* PCI bridges will now always populate the `subsystem-vendor-id` and
+  `subsystem-id` properties if present.
+* x86 PCI Bridges **will not** change their devinfo node name to the
+  subsystem ID. New platforms will use the subsystem ID if present.
+* New platforms (i.e. ARM, RISC-V, etc.) will name nodes either `pciex`
+  or `pci` depending on whether or not they are actually PCI Express or
+  traditional PCI devices.
+* Bridges will only included the unambiguous subsystem ID PCI alias (e.g.
+  `pci1234,5678,s`). New platforms will not include the ambiguous form
+  of primary or subsystem IDs for any devices.
+* New Platforms will continue to follow the IPD 9 suggestion of not
+  including PCI aliases for PCI Express devices.
+* Logic to set the compatible aliases, node names, and related will be
+  shared across all platforms and will no longer be duplicated in both
+  the boot and hotplug paths.
+
+== Subsystems for PCI Bridges
+
+PCI devices have multiple different types of headers that are found in
+configuration space. These are called Type-x where x is the value of the
+field. There are three such headers defined right now:
+
+* Type 0 headers: These are used by almost all PCI and PCIe devices
+  other than bridges.
+* Type 1 headers: These are used for PCI-PCI bridges.
+* Type 2 headers: These are used by Cardbus (and we will ignore for the
+  rest of this IPD)
+
+In the initial 0x40 byte header there are a number of fields that are
+the same between the different PCI headers. These include things like
+the device ID, vendor ID, class code, interrupt pin, and capabilities
+pointer. However, there are many properties that are different. For
+example the layout of base address registers is one major case. Most
+relevant for this IPD is that of the PCI subsystem IDs.
+
+While Type 0 and Type 2 headers have defined subsystem IDs in this part
+of the space, Type 1 headers do not. Instead, for type 1 headers there
+is an optional PCI capability for a subsystem ID. This capability, with
+code `0xd`, is found in the traditional PCI configuration space and is
+not part of extended configuration space.
+
+== devinfo tree node names
+
+PCI and PCI express nodes use two different pieces to try and construct
+the node name that is used in the devinfo tree. The node name is fairly
+important as this is what we use for the name in the actual `/devices`
+file system.
+
+While it is possible for `/devices` paths to change, there is a general
+expectation that some things have some amount of consistency. The most
+notable piece of this is due to how ZFS encodes information about how to
+boot systems. Here, `/devices` paths are used as part of booting in
+particular on i86pc based systems. This is most notable through changes
+like https://illumos.org/issues/7119[7119 boot should handle change in
+physical path to ZFS root devices]. While 7119 did help for some
+devices, it does not help for everything. This is worth noting as we
+delve further.
+
+This is structured of the form `<prefix><id0>,<id1>`. IDs 0 and 1 are
+the subsystem vendor ID and subsystem ID if both are valid, otherwise
+they are the primary vendor and device ID. This was the same on both
+SPARC and x86. The biggest difference between them has been the prefix.
+On x86 the prefix is always `pci`; however, on SPARC the prefix was
+either `pciex` or `pci`, depending on whether or not the device was a
+PCI Express device.
+
+The reason that this is problematic for bridges is that neither SPARC or
+x86 ever did look for the subsystem IDs for bridges (both platforms
+`pcicfg_set_childnode_props` in the hotplug path just assume Type 0
+headers, though it is possible the PROM did something here). If we just
+properly found the subsystem ID and just used that blindly, then we
+would end up changing the `/devices` paths of everything and that would
+lead to boot failures for a number of different configurations. This
+means that the simple path of just using the new device ID isn't what we
+should be doing.
+
+When faced with the stark challenge of breaking all installs or not, the
+answer is quite simple: do not. This means that we cannot change the IDs
+used on x86 for bridges even if a subsystem exists. We can still set the
+various devinfo properties such as `subsystem-vendor-id` and
+`subsystem-id`.
+
+For non-x86 platforms that are new and therefore not constrained with
+this compatibility problem, we will move forward such that the prefix
+part of the node name is either `pciex` or `pci` depending on whether or
+not the device is a PCI express device or not. In addition, we propose
+that they use the subsystem ID when present for bridges, eliminating the
+distinction between Type 0 and Type 1 systems.
+
+=== 1275 Generic Names
+
+SPARC opted to use generic names for different devices based on
+the class code. So rather than naming a device `pci8086,10de` for the
+Intel 82574L, it would instead name itself `ethernet`. This has
+traditionally been controlled by definitions in `sys/isa_defs.h`. x86
+has always defined `_DONT_USE_1275_GENERIC_NAMES` which stops this
+behavior. With SPARC no longer being supported, this will be removed
+entirely and new platforms will not try to use 1275 generic names at
+this time.
+
+The main reason for this is that this list cannot easily be added to.
+For example, the above lists never had support for the NVMe device
+class. Once support for the device is added, we really should avoid
+trying to change its name in `/devices`. This is not a hard constraint
+to say that node names cannot change, but rather based on some of the
+challenges with the structuring of booting with ZFS and others, we
+basically view it as not being worth the benefit. `/devices` isn't
+really meant as an interface for humans, but rather is for the system
+itself.
+
+== Bridge Compatible IDs
+
+The `compatible` property for such devices is discussed at length in
+https://github.com/illumos/ipd/blob/master/ipd/0009/README.md[IPD 9 PCI
+Alias Disambiguation]. The main focus of that effort was the addition of
+the suffixed versions of non-fully qualified PCI IDs where we used `,p`
+and `,s` to indicate if an ID was the primary or subsystem IDs.
+
+Because x86 has never exposed the ambiguous versions of the bridge
+subsystem ID, we propose that we **do not** include it here. While this
+is a slight difference from other x86 devices, it ultimately takes us
+more down the path that we want to be in and also provides a layer of
+safety.  Issues like the miss-programmed device in
+https://www.illumos.org/issues/11610[11610 PCI ID ambiguity leads to
+driver induced mayhem] may be lurking and given the prominence of
+PCI-PCI bridges, the use of the preferred form will provide us a degree
+of safety.
+
+Due to the fact that bridges have always included the primary
+vendor/device ID alias, we cannot get rid of that for x86 bridges;
+however, for new platforms, we should not include the ambiguous device
+IDs at all and only use the `,p` and `,s` versions.
+
+New platforms have a little bit more freedom in this space. IPD 9
+already proposed that we do not include PCI aliases for PCIe devices.
+However, for PCI devices that we encounter we should ask what subset of
+IDs to include are. It is tempting to follow suite and eliminate the
+non-fully qualified subsystem IDs entirely, but we currently suggest
+that we include the suffixed versions.
+
+In summary, this means that PCI ID aliases will be ordered as:
+
+. pci<vendor>,<device>.<subsystem-vendor>.<subsystem-id>.<revision>
+. pci<vendor>,<device>.<subsystem-vendor>.<subsystem-id>
+. pci<subsystem-vendor>.<subsystem-id>,s
+. pci<subsystem-vendor>.<subsystem-id> (x86 only)
+. pci<vendor>,<device>.<revision>
+. pci<vendor>,<device>,p
+. pci<vendor>,<device> (x86 only)
+. pciclass,<base class><sub-class><programming interface>
+. pciclass,<base class><sub-class>
+
+== pcieadm enhancements
+
+Along with this work, we will enhance pcieadm show-devs with the
+following top-level fields:
+
+* `SVID`: Subsystem Vendor ID
+* `SSID`: Subsystem ID
+* `SUBSYSTEM`: The string form of the subsystem from the PCI IDs
+  database
+
+== Centralizing Logic
+
+One last part of this is that we really should clean up the per-platform
+nature of this. Both x86 and SPARC had separate copies of all the logic
+to set basic devinfo properties on PCI devices in the boot path. Even
+worse, x86 has different copies with slightly different behavior in the
+boot and hotplug case. The hotplug case missed the original IPD 9
+efforts as a result.
+
+Rather than continuing to have this copied and pasted around the gate,
+we should instead have a single set of logic for setting this up which
+can encode these rules for future platforms now. Work on future
+platforms is allowed to modify these decisions based on the reality on
+the ground as the port is being done, but it is our hope that this
+simplifies the effort.
+
+The initial location of this will be the `pcie` module. This is being
+chosen mostly out of practicality. The two current drivers of this logic
+are the `pcicfg` module and the `pci_autoconfig` module on x86. Both of
+these depend on the `pcie` module. While a bit surprising, the `pci`
+module is not used as part of this process unless something else ends up
+causing it to be loaded. The `pci` module is actually a nexus driver
+whose PCI Express equivalent is `npe`.

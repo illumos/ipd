@@ -2,7 +2,7 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor: Rich Lowe <richlowe@richlowe.net>

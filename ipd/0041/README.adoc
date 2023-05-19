@@ -96,6 +96,15 @@ physical path to ZFS root devices]. While 7119 did help for some
 devices, it does not help for everything. This is worth noting as we
 delve further.
 
+A second example of this is with FMA's retire store and faulty devices.
+The retire store is populated based on the /devices path of entries and
+that makes it into persistent files. The retire store is more in the
+case of something like `/etc/path_to_inst` where changes can be dealt
+with though they have some side effects that can be dealt with. While
+the retire store unretiring a device is not as bad (but not great),
+having `/etc/path_to_inst` change does have an impact on instance naming
+which in turn can impact networking configuration.
+
 This is structured of the form `<prefix><id0>,<id1>`. IDs 0 and 1 are
 the subsystem vendor ID and subsystem ID if both are valid, otherwise
 they are the primary vendor and device ID. This was the same on both
@@ -114,7 +123,7 @@ lead to boot failures for a number of different configurations. This
 means that the simple path of just using the new device ID isn't what we
 should be doing.
 
-When faced with the stark challenge of breaking all installs or not, the
+When faced with the stark challenge of breaking most installs or not, the
 answer is quite simple: do not. This means that we cannot change the IDs
 used on x86 for bridges even if a subsystem exists. We can still set the
 various devinfo properties such as `subsystem-vendor-id` and

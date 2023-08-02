@@ -53,6 +53,7 @@ information is available at the end of this document.
 | published | [IPD 39 Datalink Media Types](./ipd/0039/README.adoc)
 | draft     | [IPD 40 Cross compilation for illumos](./ipd/0040/README.md)
 | draft     | [IPD 41 Improving PCI devinfo Naming and Future Platforms](./ipd/0041/README.adoc)
+| draft     | [IPD 42 Sunset native printing](./ipd/0042/README.md)
 
 
 ## Contributing

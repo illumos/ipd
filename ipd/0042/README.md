@@ -33,11 +33,7 @@ would be beneficial.
 The following packages (under usr/src/pkg/manifests) would be affected. All
 content would be removed and the packages marked obsolete.
 
-* compatibility-ucb.p5m
 * print-lp-compatibility-sunos4.p5m
-
-The lp links are in the 2nd package; the man pages are in the first.
-
 * library-print-open-printing-ipp.p5m
 * library-print-open-printing-lpd.p5m
 * library-print-open-printing.p5m
@@ -53,6 +49,11 @@ usr/src/man/man3lib/libpapi.3lib.
 * print-lp.p5m
 
 There are some packages that contain print-related files:
+
+* compatibility-ucb.p5m
+
+This has the man pages for the print utilities shipped in
+print-lp-compatibility-sunos4.p5m.
 
 * consolidation-osnet-osnet-message-files.p5m
 * system-trusted.p5m

@@ -28,6 +28,35 @@ A combination of lack of use, lack of maintenance, no 64-bit code, and the
 presence of a superior alternative, suggests that removal of our implementation
 would be beneficial.
 
+## Current implementation and transition
+
+The current printing implementation foresaw the elimination of the legacy
+lp stack and its replacement by CUPS. A `print-service` command is installed
+in /usr/sbin, and the user invoked commands are symbolic links to that binary.
+The binary then invokes either the legacy command (installed under /usr/lib/lp)
+or the CUPS variant (expected to be installed under /usr/lib/cups).
+
+Invoking the `print-service` command directly allows an administrator to
+switch between different implementations of the print service.
+
+Ultimately, this implies that removing the legacy print service is a flag
+day for any distribution using this mechanism. An investigation of the current
+state of distribution printing indicates that:
+
+* OpenIndiana uses the print-service mechanism and would need to rebuild
+CUPS to install directly under /usr after the native lp print system was
+removed
+* OmniOS ships CUPS separately as part of omnios-extra, but installs it in a
+non-conflicting path
+* SmartOS does not ship a printing system at all, but CUPS is available
+from pkgsrc
+* Tribblix does not use the print-service mechanism and ships CUPS in the
+regular path; in the next release the native print system will not even be
+available as an option
+
+A possibility would be to ship just the print-service wrapper, but default
+it to CUPS.
+
 ## Packages
 
 The following packages (under usr/src/pkg/manifests) would be affected. All
@@ -109,6 +138,18 @@ And man pages
 And references exist in
 
 * nsswitch.conf.5
+
+## Existing bugs
+
+There are a couple of - very old - existing bugs that suggest the removal of
+the native printing stack
+
+* [1229 EOF SVr4 print support](https://www.illumos.org/issues/1229)
+* [2837 remove print/lp* from gate and use CUPS from userland](https://www.illumos.org/issues/2837)
+
+And some preparatory work has already removed the old java printmgr gui
+
+* [13180 Remove printmgr, as it doesn't work with any current java](https://www.illumos.org/issues/13180)
 
 ## Open Questions
 

@@ -1,0 +1,421 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+
+= IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+Recently, we've been working through the implementation of
+https://github.com/illumos/ipd/blob/master/ipd/0037/README.md[IPD 37
+Vendor-specific Command, Log, and Feature Support in nvmeadm(8)] with an
+eye towards being able to get vendor-specific logs and a few forward
+looking cases. In tandem, NVMe 2.0 based devices have started to arrive
+on the market. In addition, we've found ourselves wanting to have other
+pieces be able to consume NVMe devices through something more than the
+CLI. This includes things like:
+
+* System software that wants to be able to have a library interface to
+  discover, format, and generally manipulate NVMe devices.
+* Improving the FM FRU monitor so that it can perform NVMe-specific
+  functions and vendor-specific functions.
+* Better tooling for being able to scrape and process NVMe log pages to
+  feed into other metric systems.
+
+Now that we're spent almost a decade with the existing driver and
+interfaces and we've seen the evolution of NVMe specification, it's time
+to lay the foundation for the next decade of use here.
+
+In particular, this IPD proposes:
+
+* Enabling basic NVMe 2.x support
+* The addition of a new library, `libnvme(3LIB)` that we will eventually
+  stabilize
+* Improvements to the kernel ioctl interface to improve our ability to:
+** Incrementally update various ioctls to support more recent NVMe
+   features (e.g. log-specific fields and parameters)
+** Issue commands across different minors
+** Improve the ability to get controller errors out
+** Make the locking situation a little more fine-grained
+* Provide the foundation for easily adding additional NVMe features
+
+This IPD does not have full concrete proposals for the way that each of
+these pieces should work, but rather laying out where we want to go
+directionally.
+
+== NVMe 2.x support
+
+As NVMe 2.x devices are entering the market, we have gone through and
+reviewed the various breaking changes list that are published by the NVM
+Express and there aren't many that impact the driver today. More of
+these impact the device end or are in features that we haven't currently
+implemented. While there are newly defined transports and command sets
+beyond the NVM set, we can easily enable devices today.
+
+Concretely, we should take the following steps:
+
+. Do the basic work to validate an NVMe 2.0 device works and update the
+major version check in the driver to indicate that.
+. As part of the steps to implement libnvme and the kernel
+improvements, go through and incrementally enable various NVMe 2.x
+log pages, features, etc. as it makes sense.
+. This is not currently proposing adding support for ZNS or K/V
+interfaces at this time.
+
+For more project plan notes, see <<sec-pp>>.
+
+== The Case for libnvme
+
+With the increased prevalence of NVMe devices, managing these has become
+more and more important. While
+https://illumos.org/man/8/nvmeadm[nvmeadm(8)] provides a good number of
+features and can be useful in both scripted and interactive use cases,
+it is harder to use from management daemons and other software.
+Conversely, the kernel ioctl interface has been explicitly uncommitted.
+This has been good, because the NVMe specification has changed a lot
+here and the ioctls and pieces that we included in our original
+iterations would not have been sufficient for what we needed.
+
+In addition, having a library based interface would help simplify not
+only the nvmeadm implementation, help consolidate different logic that
+is being spread across the FMA topology modules, but more importantly,
+provide a basis for utilizing this from other programming languages that
+would like to manage this via FFI (e.g. rust, golang, python, etc.). The
+kernel ioctl interface is not the right place for this stability. While
+it's not impossible to make the ioctl interface full of versioned
+structures, it's not always the most ergonomic way to build things.
+
+In addition, there are certain things that the kernel doesn't have to
+know about that we want to facilitate. The majority of vendor-specific
+logs and features are something that the NVMe driver itself will normally
+know about. While we could pile more metadata into the kernel, there's
+no reason for it to have to do that.
+
+=== Library Features
+
+The library should be able to cover the following major use cases:
+
+* Device and Namespace Discovery
+* Device and Namespace Information retrieval (ala `nvmeadm list`)
+* Provide access to various `Identify` commands
+* Allow consumers to discover all of the supported and vendor-specific
+  features, log-pages, and commands
+* Be able to retrieve logs, get and set features
+** Simplify the retrieval of known items
+** Have the flexibility to issue unknown vendor-specific requests
+* Provide common implementation for well-known vendor-specific commands
+* Namespace management
+* Deal with formatting and erasing of devices and namespace
+* Firmware upgrade
+* blkdev related management
+
+While on the surface it may be simple to summarize this as being able to
+do whatever `nvmeadm(8)` can do, being able to robustly do all that from
+a library is quite valuable. However, while the features above are
+important, there are also several things that we need to consider from a
+developer ergonomics perspective:
+
+. The NVMe specification constantly is adding new features into commands
+that were previously optional and replace zero values. The library needs
+to be designed such that someone who has built this and doesn't know
+about a new feature can still work without needing to make changes.
+
+. We need to consider that there will be consumers who want to use this
+outside of just a native C environment that may span multiple other
+compiled or dynamic languages. This ties into the prior point and means
+that we need to design the data structures carefully, generally leaving
+them opaque. In addition, we need to think about how the control flow
+works. While some folks will prefer callback functions, others will want
+to be able to perform iteration at their leisure.
+
+. Have clear and explicit lifetimes between handles in the library. In
+general, it should be possible for someone with a single library handle
+to operate on multiple controllers in parallel while retaining rich
+error information. This also ties into making it clear and obvious what
+the lifetimes of the various objects and their relationships are.
+
+. Providing interfaces that make it easy to snapshot information and
+then consume it when the device is no longer present. For example, the
+`smbios -w` or `pcieadm save-cfgspace` commands make it so we can
+capture data on a target system in a way that it can be sliced and
+decided on an entirely different system later.
+
+. Having richer error semantics than errno values. In particular, having
+discrete error codes that can be retrieved from the different objects
+along with translatable error messages that can provide more context
+about what's wrong and why. No one wants to get `EINVAL` and then have
+to start guessing about what was invalid.
+
+The following are non-goals at this time of the library:
+
+* Providing a mechanism to perform arbitrary I/O on the NVMe device.
+  That should be instead done through the namespace minors and the
+  existing standard operations until we have a need.
+
+* Today none of the control nodes for an NVMe device show up within
+  `/dev`, only the blkdev instances. As such, there are no operations
+  for us to support at this time. The library will require the ability
+  to take a devinfo snapshot for device discovery.
+
+* Changing the privilege model to be more fine grained. NVMe devices
+  today use a minor node privilege of `0600` and do not perform any
+  prvilege checks for ioctls. While that may change to require
+  `PRIV_SYS_DEVICES`, from the library perspective we assume someone is
+  either privileged or not and are not planning to break that down into
+  finer granularity at this time.
+
+=== Library Stability
+
+Initially, we suggest that this library should be uncommitted. While we
+want to get to a point that we can have this be stable and work towards
+that, it's also prudent to recognize we're not going to get there on the
+first try. Having something with good manual pages will encourage folks
+to use it and put us on a path to being conformable stabilizing it.
+
+The exact time frame isn't clear and will depend on broader community
+feedback and utilization. However, the library is exactly the place to
+create this stability. As we'll discuss in the next section the
+flexibility in keeping the kernel interface private here is important,
+especially as we don't know things will evolve if someone adds non-PCIe
+based NVMe targets.
+
+== Kernel ioctl Interface
+
+Prior to writing this IPD, we began working through and prototyping what
+a library interface would look like to get log pages. Here are a few
+examples where things kind of became a little gnarly:
+
+. The NVMe get log page command allows for you to specify not just the
+log page ID, but also many additional fields. Some of these have
+important semantics such as not clearing an asynchronous event that the
+driver may be racing us for. These aren't present in the ioctl interface
+at all and there are several other parameters that have been added
+including pieces from NVMe 1.2, 1.3, 1.4, and 2.0. This is likely the
+case with several of the other ioctls.
+
+. Some ioctls require you to have open the controller while others
+require you to have open a particular namespace. This causes a few
+different challenges, including:
+* Namespaces which the kernel ignores often can't be referred to.
+* The granularity of locking means that if you open the controller with
+  `O_EXCL`, you can't actually open the namespace `O_EXCL` which is
+  require if you want to say issue a format command and don't happen to
+  be on the same thread.
+
+. More generally, the granularity and means of obtaining exclusive
+access are a little challenging for things that want to happen. The only
+way to obtain exclusive access is to do so at `open(2)` time. This isn't
+great for a library which wants to maintain a reference to the
+controller. While it'll require us to be a bit more complicated and
+nuanced, providing a bit more flexibility here will be useful for
+consumers.
+
+. Right now all errors are translated back to errno values. This makes
+it hard to figure out what went wrong semantically. There are several
+different reasons that one can get an `EINVAL` value in many code paths.
+It also means that there is no way to get the raw controller return
+values which can be especially useful if executing vendor-specific
+commands.
+
+Now that we want to do things with a bit more complexity, there are a
+number of things that  think we should do and change here. The fact
+that the ioctl interface is private is a boon.
+
+=== Namespaces and Minors
+
+While the existing minors for namespaces is useful, we should change the
+overall ioctl structure to have a common way across all ioctls to
+specify a namespace. If one is on the controller node, then they can
+operate on all namespace. If one is on the existing namespace node, then
+they only thing they should be able to target is the namespace itself.
+
+More specifically, specifying an nsid of 0 (which is invalid in the
+spec) would always operate on the current thing you have open. If the
+nsid is non-zero and someone is using a namespace minor node, the only
+acceptable value will be that of their namespace. If on the controller,
+then they'll be able to refer to any namespace or use the broadcast
+namespace (0xffffffff) assuming the ioctl in question operates on a
+namespace.
+
+However, we will not support operating on the controller from a
+namespace minor. The namespace minor will only support operations
+constrained to that namespace. Fore example, you would not be able to
+request the controller's firmware upgrade log for that minor.
+
+The value of this is it gives us a way to interrogate or refer to minors
+that the driver has set the ignore flag on: which is all namespaces that
+are inactive or active namespaces that have properties that we don't
+support. Over time, we can evaluate whether or not we still need
+namespace specific minors or not, but that is not intended to be part of
+this IPD. Either way, we will not create minor nodes for those which are
+ignored today.
+
+=== Changing the ioctl Shape and Semantic Errors
+
+Today all NVMe ioctls use the common `nvme_ioctl_t` which looks like:
+
+----
+typedef struct {
+        size_t          n_len;
+        uintptr_t       n_buf;
+        uint64_t        n_arg;
+} nvme_ioctl_t;
+----
+
+The original goal was well placed. Given that most ioctls had a single
+argument or you could refer to the target namespace via the namespace
+minor, a single argument was sufficient, especially given that most
+consumers were going to have to copy in structured data. However, as
+we've started updating the ioctls to support features in newer
+specifications or the ability to run arbitrary vendor-specific commands
+this has ended up being a little more complicated.
+
+The above structure already has ILP32/LP64 concerns; however, because
+the single argument (`n_arg`) is not enough to specify all the nuance of
+newer requests, folks end up having to define yet another structure that
+also has the same ILP32/LP64 concerns, eliminating some of the value of
+this particular shape. Instead, what we suggest is that each ioctl has a
+common header.
+
+This common header would have two distinct pieces to it:
+
+. A way to specify the namespace for the ioctl, subject to the
+constraints discussed in the namespace section above.
+. A way to return an NVMe driver specific error and the controller's
+SCT/SC fields. Those fields could also be reused as additional semantic
+information based upon the error code.
+
+This would look something like:
+
+----
+typedef struct {
+        /*   
+         * This allows one to specify the namespace ID that the ioctl may
+         * target, if it supports it. This field may be left to zero to indicate
+         * that the current open device (whether the controller or a namespace)
+         * should be targeted. If a namespace is open, a value other than 0 or
+         * the current namespace's ID is invalid.
+         */
+        uint32_t nioc_nsid;
+        /*   
+         * These next three values represent a possible error that may have
+         * occurred. The driver error indicates an error that came from our
+         * driver, while the subsequent field indicates an error that came from
+         * the controller. A particular error key may define the use of sct/sc
+         * for its own additional information.
+         */
+        uint32_t nioc_drv_err;
+        uint32_t nioc_ctrl_sct;
+        uint32_t nioc_ctrl_sc;
+} nvme_ioctl_common_t;
+----
+
+While the above is just a prototype, it's a helpful starting point for
+conversation. An important consideration we had was considering a string
+with more information in the above; however, that leads to a lot of
+localization challenges and therefore that's better to provide outside
+of the kernel. Instead we should focus on providing an enumeration of
+fine grained errors. Something much more obvious and specific than
+EINVAL. We should not be afraid to be very specific.
+
+With the above in place, each ioctl would just define its own type. It
+does mean that when ILP32/LP64 logic has to be done, it can no longer be
+shared, but that is probably better than the double logic that we had in
+an increasing number of cases.
+
+=== Exclusive Access
+
+Today exclusive access is granted at `open(2)` time. If you want
+exclusive access to a controller, that requires that no namespace is
+open. Once the device is open there is no way to begin or end a
+transaction or change what you have access to.
+
+In general, I think there are going to be some different patterns that
+folks are going to want to have access to as we extend the ability of
+software to monitor NVMe devices, pull logs, and related. However, other
+software will occasionally want to lock out others so it can perform a
+software update. In other cases, when discovering namespaces, one may
+want to make sure the set of namespaces isn't changing; however, two
+namespaces could be erased in parallel or being attached/detached from
+blkdev.
+
+In general this suggests the following levels of exclusivity that we may
+want to consider:
+
+* Ability to access the control data for write in such a way that
+  everyone else is blocked out. This is useful for things like
+  performing firmware updates, erasing the entire device, etc.
+** A variant of the above where you're allowed to set features and
+   perform a subset of actions that may not require full device access.
+   This seems less important immediately and is something we could add
+   later.
+* The ability to exclusively control a single namespace, much like we
+  have today.
+* The ability to either have a read lock on the namespace list so you
+  can guarantee that you see a consistent view of the namespaces.
+* The ability to note that you're reading the controller information
+  such as the identify actions, getting log pages and features, etc.
+
+These exclusive requests would be tied to the handle. If a controller
+handle is open, it would be possible to grant one of the above at any
+level. Importantly one should be able to say grab a write lock on the
+entire controller (if desired) and then lock smaller subsets as needed
+and then unlock the controller.
+
+This also suggests an important change: **exclusivity is not based on
+the thread, but the open handle**. This is important for a number of
+reasons:
+
+. File descriptors can be passed around.
+. In complex deaemons, the thread that opened a device often isn't the
+one taking actions on it. There may be thread pools or other concurrency
+primitives being used.
+
+This has implications on the driver implementation. Opening up a device
+will require us to implement a cloning open. That's fine, but it's worth
+admitting that it is involved.
+
+While we may still want to require exclusive access for operations such
+as blkdev attach/detach, erase, format, etc. there is no strict
+requirement that it be used for other read-based mechanisms. However, we
+do believe that a common pattern here in most monitoring tools or even
+something like `nvmeadm` will be to take a read lock on the namespaces
+and then 
+
+[[sec-pp]]
+== Project Plan
+
+This sections outlines how we think about implementing this set of
+features:
+
+. Initially begin with the bare minimum required to enable NVMe 2.x
+devices to attach and function. That way people who are buying client
+NVMe devices such as the Samsung 990 Pro will function.
+. Next, move onto prototyping an overhaul of the ioctl interface and
+library. With this we want to prototype and do the extended / new get
+log page semantics so we can get vendor-specific log pages via `nvmeadm`
+utilizing an initial `libnvme(3LIB)`. This would introduce the new
+common ioctl structure and provide an `nvmeadm` in terms of `libnvme` as
+well as replace the existing FM basics with this.
+. Once that is done we would explore the following concurrently in a to
+be determined order:
+* Leveraging the new library for adding improved libtopo sensors and
+  disk monitoring.
+* Add support for many newer log pages.
+* Extend the get features and set features logic to learn about
+  additional features and perform discovery.
+* Improve and understand our NVMe error detection, identify controller
+  structures, and related to be fully good with NVMe 2.0.
+* Go and explore overhauling the device exclusivity logic.
+. At some time in the further future, evaluate how libnvme is working
+with an eye towards making this a committed interface.

@@ -32,7 +32,7 @@ CLI. This includes things like:
 * Better tooling for being able to scrape and process NVMe log pages to
   feed into other metric systems.
 
-Now that we're spent almost a decade with the existing driver and
+Now that we've spent almost a decade with the existing driver and
 interfaces and we've seen the evolution of NVMe specification, it's time
 to lay the foundation for the next decade of use here.
 
@@ -97,9 +97,9 @@ structures, it's not always the most ergonomic way to build things.
 
 In addition, there are certain things that the kernel doesn't have to
 know about that we want to facilitate. The majority of vendor-specific
-logs and features are something that the NVMe driver itself will normally
-know about. While we could pile more metadata into the kernel, there's
-no reason for it to have to do that.
+logs and features are not something that the NVMe driver itself will
+normally know about. While we could pile more metadata into the kernel,
+there's no reason for it to have to do that.
 
 === Library Features
 
@@ -209,7 +209,7 @@ different challenges, including:
 * Namespaces which the kernel ignores often can't be referred to.
 * The granularity of locking means that if you open the controller with
   `O_EXCL`, you can't actually open the namespace `O_EXCL` which is
-  require if you want to say issue a format command and don't happen to
+  required if you want to say issue a format command and don't happen to
   be on the same thread.
 
 . More generally, the granularity and means of obtaining exclusive
@@ -236,8 +236,9 @@ that the ioctl interface is private is a boon.
 While the existing minors for namespaces is useful, we should change the
 overall ioctl structure to have a common way across all ioctls to
 specify a namespace. If one is on the controller node, then they can
-operate on all namespace. If one is on the existing namespace node, then
-they only thing they should be able to target is the namespace itself.
+operate on all namespaces. If one is on the existing namespace node,
+then they only thing they should be able to target is the namespace
+itself.
 
 More specifically, specifying an nsid of 0 (which is invalid in the
 spec) would always operate on the current thing you have open. If the
@@ -298,6 +299,20 @@ information based upon the error code.
 This would look something like:
 
 ----
+typedef enum {
+        /*
+         * Indicates that the command actually completed successfully.
+         */
+        NVME_IOCTL_E_OK = 0,
+        /*
+         * Indicates that the controller failed the command and the controller
+         * specific (SC/SCT) are available. For all other errors, those fields
+         * are reserved.
+         */
+        NVME_IOCTL_E_CTRL_ERROR,
+	...
+} nvme_iocl_error_t;
+
 typedef struct {
         /*   
          * This allows one to specify the namespace ID that the ioctl may
@@ -307,12 +322,15 @@ typedef struct {
          * the current namespace's ID is invalid.
          */
         uint32_t nioc_nsid;
-        /*   
+        /*
          * These next three values represent a possible error that may have
-         * occurred. The driver error indicates an error that came from our
-         * driver, while the subsequent field indicates an error that came from
-         * the controller. A particular error key may define the use of sct/sc
-         * for its own additional information.
+         * occurred. On every ioctl nioc_drv_err is set to a value from the
+         * nvme_ioctl_errno_t enumeration. Anything other than NVME_IOCTL_E_OK
+         * indicates a failure of some kind. Some error values will put
+         * supplemental information in sct and sc. For example,
+         * NVME_IOCTL_E_CTRL_ERROR uses that as a way to return the raw error
+         * values from the controller for someone to inspect. Others may use
+         * this for their own well-defined supplemental information.
          */
         uint32_t nioc_drv_err;
         uint32_t nioc_ctrl_sct;
@@ -417,5 +435,7 @@ be determined order:
 * Improve and understand our NVMe error detection, identify controller
   structures, and related to be fully good with NVMe 2.0.
 * Go and explore overhauling the device exclusivity logic.
+* Work through other outstanding changes (e.g. namespace management) and
+  help update them for this.
 . At some time in the further future, evaluate how libnvme is working
 with an eye towards making this a committed interface.

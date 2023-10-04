@@ -2,9 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: predraft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor: Joshua M. Clulow <josh@sysmgr.org>
 
 = IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface
 {authors}

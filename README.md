@@ -52,9 +52,9 @@ information is available at the end of this document.
 | published | [IPD 38 Signal Handling, Extended FPU State, ucontexts, x86, and You](./ipd/0038/README.adoc)
 | published | [IPD 39 Datalink Media Types](./ipd/0039/README.adoc)
 | draft     | [IPD 40 Cross compilation for illumos](./ipd/0040/README.md)
-| draft     | [IPD 41 Improving PCI devinfo Naming and Future Platforms](./ipd/0041/README.adoc)
+| published | [IPD 41 Improving PCI devinfo Naming and Future Platforms](./ipd/0041/README.adoc)
 | draft     | [IPD 42 Sunset native printing](./ipd/0042/README.md)
-| draft     | [IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface](./ipd/0043/README.adoc)
+| published | [IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface](./ipd/0043/README.adoc)
 
 
 ## Contributing

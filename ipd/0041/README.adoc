@@ -2,10 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
-:sponsor: 
+:sponsor: Rich Lowe <richlowe@richlowe.net>
 
 = IPD 41 Improving PCI devinfo Naming and Future Platforms
 {authors}

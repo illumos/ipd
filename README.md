@@ -55,6 +55,7 @@ information is available at the end of this document.
 | published | [IPD 41 Improving PCI devinfo Naming and Future Platforms](./ipd/0041/README.adoc)
 | draft     | [IPD 42 Sunset native printing](./ipd/0042/README.md)
 | published | [IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface](./ipd/0043/README.adoc)
+| predraft | [IPD 44 Distribution as a first class concept](./ipd/0044/README.adoc)
 
 
 ## Contributing

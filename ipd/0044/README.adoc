@@ -1,0 +1,320 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Andy Fiddaman <illumos@fiddaman.net>; Keith Wesolowski <wesolows@oxide.computer>
+:sponsor:
+:source-highlighter: highlight.js
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 44 Distribution as a first class concept
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+At Oxide, we recently added support for
+https://www.illumos.org/books/dtrace/chp-anon.html#chp-anon[Anonymous DTrace]
+on Oxide server sleds. This required some work as these systems boot with
+a ramdisk-backed root filesystem which is discarded on reboot and replaced
+with a fresh copy each time. Some mechanism to preserve and inject the files
+necessary to enable Anonymous DTrace during system boot was necessary. For
+some, this is the
+https://wesolows.dtrace.org/2013/12/28/anonymous-tracing-on-smartos/[second time they've arrived here] -
+SmartOS also uses a ramdisk root and needs some additional steps to enable
+Anonymous DTrace.
+
+The Oxide implementation adds a
+https://github.com/oxidecomputer/illumos-gate/commit/80cbd83785413166fcdd30080245ba7ca3b3b97e[dtrace helper]
+that is invoked automatically after a `dtrace -A` command prepares the files
+and does whatever is necessary to make those available during the next boot.
+This is a generic mechanism that could also be used on SmartOS, but it begs the
+obvious question on how the helper should be selected.
+
+Today an instance of illumos is characterised by ISA (`amd64`, `aarch64`), by
+machine or platform type (`i86pc`, `oxide`, `armpc`), and by implementation
+(`SUNW,Ultra-Enterprise`, `Oxide,Gimlet`, `i86pc`). Implementations exist that
+don't have implementation-specific kernels, too. None of these provide what is
+really needed here to select the appropriate dtrace helper -- a SmartOS system,
+for example, uses the `i86pc` platform type.
+
+This IPD proposes the introduction of a new `Distribution` concept that could
+be used for this purpose, but has wider application.
+
+== Distribution names
+
+A distribution name consists of a lower-case ASCII string consisting solely of
+the characters in `0–9`, `a–z`, `.`, `_` and `-`. The maximum length of a
+distribution name is 63 characters.
+
+== Identifying the running distribution
+
+The distribution that is running on a particular illumos instance will be
+identified by the contents of a file in `/etc`. If the distribution cannot
+be determined, then the distribution name will be set to `default`.
+
+=== /etc/os-release
+
+A number of distributions provide an
+https://www.man7.org/linux/man-pages/man5/os-release.5.html[`/etc/os-release`]
+file which includes an `ID` field which could be used for this purpose.
+[source,console]
+----
+$ grep '^ID=' /etc/os-release
+ID=omnios
+----
+This file is shell-compatible in that it can be sourced from Bourne shell
+scripts, and has the same character set restrictions as proposed above
+(although no inherent length limit). The ID can also be extracted via the
+existing `def*()` routines in libc, although a new library call for retrieving
+this is proposed below.
+
+== Filesystem layout
+
+Distribution-specific files will be delivered into `/dist` or `/usr/dist`, as
+a peer to `/platform`.
+
+As a concrete example for the dtrace helper, Oxide's Helios distribution
+would provide `/usr/dist/helios/bin/dtrace-anon-helper` and SmartOS would
+provide `/usr/dist/smartos/bin/dtrace-anon-helper`, while illumos-gate
+would provide `/usr/dist/default/bin/dtrace-anon-helper` as a symlink to
+`/bin/true`. Distributions that do not want to override this helper would
+just symlink to the corresponding file in `/usr/dist/default`.
+
+The combined filesystem layout here would look something like this, although
+only the default and distribution-specific trees would generally be present on
+any particular system.
+
+----
+usr/dist/
+    default/
+        bin/
+	    dtrace-anon-helper -> /bin/true
+    openindiana/
+        bin/
+	    dtrace-anon-helper -> ../../../default/bin/dtrace-anon-helper
+    helios/
+        bin/
+	    dtrace-anon-helper
+----
+
+It is intended that files delivered in this manner be either read or executed
+by illumos system software (i.e., software delivered by illumos-gate), and
+optionally read or executed by distribution-specific software.  While nothing
+in general prevents an operator from modifying these files, mutability
+introduces additional complexity in synchronisation with distribution-specific
+software installation and is not an intended use case.
+
+== Defaults
+
+Default or fallback files are expected to be trivial in nature; it is not the
+intent of this feature to support a "preferred", "default", or "reference"
+distribution delivered by illumos-gate, nor to require or permit illumos-gate
+to deliver functionality specific to any distribution or family of
+distributions.  In nearly all cases, fallbacks should be symbolic links to:
+
+* /bin/true, for executable hooks, or
+* /dev/null, for files to be read
+
+Where `/dev/null` is not appropriate, a default readable file should the
+minimum contents necessary for the format of the file to be interpreted
+without specifying any distribution-specific behaviour.  Consumers of this
+functionality within illumos-gate should not make distribution-specific
+assumptions if an attempt to access a distribution-specific file fails;
+instead, the entire operation requiring the file should be aborted and unwound
+with appropriate communication of errors as it would be if some
+distribution-independent operation failed.
+
+[[s-semantics]]
+== Search and Fallback Semantics
+
+It's important that we define carefully what will happen in the case where a
+distribution-specific file is not found or is not accessible to the consuming
+system software process.  In general, the use of these distribution-specific
+hooks will be part of some larger operation that may fail, and that failure
+may require unwinding state.  We will start by making a pair of assertions
+about distribution-specific files:
+
+* If a distribution includes such a file, its behaviour or contents are
+  necessary to the correct behaviour of consuming software, and
+* It is the distributor's responsibility to deliver these files with
+  appropriate ownership and access modes so that they can be found and used by
+any of the intended consumers.
+
+=== TOCTOU
+
+If we consider the semantics associated with an attempt by system software to
+access a distribution-specific file, we will find that we are performing
+something akin to a shell's `$PATH` search but with a twist.  We begin with a
+list (in this case usually containing only two filenames, one including an
+instance of the distribution's name, the other containing the literal
+`default` in its place), and evaluate each item in turn:
+
+1. If the file is accessible for the intended purpose, the operation succeeds.
+2. If the file does not exist, proceed to evaluate the next item in the list.
+3. If the file exists but cannot be used, or the list's contents have been
+exhausted, the entire attempt to access the distribution-specific file fails.
+
+Returning to our assertions about this mechanism's intended uses, it turns out
+to be quite important to consider the classes of errors that take us to (2)
+vs. (3).  There are two things we must consider here: TOCTOU type races, in
+which a distribution-specific file may appear or disappear or its contents,
+ownership, or access modes change while system software is attempting to use
+it, and errors associated with the use of the file itself (i.e., open(2),
+read(2), or exec(2) and friends).  Note that TOCTOU is used here in its
+general sense: such a race may cause software to behave incorrectly or
+surprisingly, but does not necessarily cause the system to fail to maintain
+its security properties.
+
+We could address TOCTOU issues by providing callers either with:
+
+1. A pair of functions, one with the semantics of `exec` and one with the
+semantics of `open`, each of which is atomic with respect to changes to the
+underlying file and its metadata to the same extent as those functions.  The
+filename argument to this function would simply be expanded and the underlying
+function called on each name in turn until one succeeds or fails with `ENOENT`
+according to our algorithm above.
+
+2. We could instead provide a single function with the semantics of `open` as
+above, leaving the caller to invoke `fexecve` or similar if execution is
+intended.
+
+Or we could ignore TOCTOU and:
+
+3. Do the simplest thing of all and provide only a function that expands a
+string to the best filename that exists and, perhaps optionally, satisfies the
+criteria of an `access(2)` invocation with a caller-supplied mode.  The caller
+would then be responsible for handling errors that result from attempting to
+use this filename, including those that contradict the guarantees associated
+with `access(2)` that were previously satisfied.
+
+The first thing we need to observe is that simply attempting to `exec` in turn
+as a shell would is not what we're after.  In particular, the semantics of
+`exec` don't allow us to distinguish `ENOENT` resulting from the
+distribution-specific file itself being absent from `ENOENT` resulting from an
+extant file that requires a missing interpreter.  If such a file is present,
+it indicates clear intent on the part of the distributor that such a hook be
+invoked, and we want to indicate to consuming software that the hook exists
+but is not usable: that is, we want to fail this operation rather than
+proceeding to the default file.  Thus our option (1) is not viable.
+
+Option (2) handles all the TOCTOU issues to the extent that the operating
+system itself permits, which does not mean it is impossible for changes to the
+contents of the file to occur asynchronously due to either operator abuse or
+software installation activities; however, this is generally true of system
+software in the same way.  While this does not seem strictly necessary, it is
+perhaps desirable in that it encapsulates many of the possible error cases in
+the provided library routine and makes writing correct consumers easier.
+
+=== Symbolic Links
+
+A similar case exists where a distributor has delivered a
+distribution-specific symbolic link to a file that does not exist or cannot be
+opened.  Ideally, we would detect this condition and distinguish it from the
+condition in which the distributor delivered no such file at all, for the same
+reasons discussed previously.  But here, `open(2)` returns the same `ENOENT`
+in both cases.  We could address this by forcing use of `O_NOFOLLOW` but doing
+so would preclude the use of symlinks.  While this behaviour could be limited
+to the distribution-specific name (allowing symlinks for the default files,
+especially important as they are expected to target either `/bin/true` or
+`/dev/null` exclusively), that is likely to surprise distributors in some
+situations.  Unix gives us no really good way to address this problem without
+reintroducing a TOCTOU inconsistency.
+
+Thus we have three basic options here:
+
+1. Force `O_NOFOLLOW` when attempting to open a non-default
+distribution-specific file.
+2. Do nothing, preventing us from detecting that a distributor has delivered a
+broken symlink; we will then proceed to try the default.
+3. Force `O_NOFOLLOW` the first time, then retry without it if we get `ELOOP`.
+This allows us to distinguish the broken symlink case and fail, at the expense
+of reintroducing a race in which a working symlink is replaced by a broken
+one between attempts.
+
+Despite the imperfect nature of the algorithm, we note that (3) is never
+*worse* than (2): in either case, distributor error can prevent failure and
+allow fallback to a default implementation, but the case in (3) additionally
+requires simultaneous modification to the filesystem into a broken state.
+Given the tradeoff between the confusing nature of (1) and this unfortunate
+but unavoidable edge case, (3) seems like the better option.
+
+== Definitions and Library Functions
+
+To aid the use of distribution-specific files, the following definitions and
+library functions will be introduced.
+
+=== MAXDISTNAMELEN
+
+[source,c]
+----
+#define MAXDISTNAMELEN 64
+----
+
+Consistent with other maximum string lengths defined by standards and history,
+such as `MAXPATHLEN`, `MAXNAMELEN`, and `PATH_MAX`, this value includes the
+terminating nul byte.
+
+=== distname(3dist)
+
+[source,c]
+----
+extern int distname(char *buf, size_t buflen);
+----
+
+Populate `buf` with the running distribution name, NUL-terminated.
+
+=== distfile_open(3dist)
+
+[source,c]
+----
+extern int distfile_open(const char *template, int oflag);
+----
+
+Expand `template`, replacing all instances of `$DIST` with the running
+distribution name and attempt to open the resulting filename with flags
+`oflag`.  If the file cannot be determined to exist, the procedure will be
+attempted again with `$DIST` expanded to the literal ASCII string `default`.
+Each attempt will be made with all instances of `$DIST` expanded to the same
+value.
+
+If successful, a file descriptor is returned; otherwise, -1 is returned and
+`errno` set to the underlying fatal error.  If the distribution-specific file
+can be determined to exist but cannot be opened, the operation fails without
+evaluating the default (fallback) filename.
+
+The `oflag` argument has the same semantics as the argument of the same name
+to `open(2)`, with the restrictions that `O_RDWR`, `O_WRONLY`, `O_CREAT`, and
+`O_APPEND` are not allowed; if supplied, the operation will fail with `EINVAL`
+and no filenames will be evaluated.
+
+If `template`, when expanded to the non-default distribution-specific
+filename, refers to a symbolic link, the function will attempt to determine
+whether the target of the link exists and can be opened.  If so, the operation
+succeeds as described above; if not, it will be aborted without attempting to
+fall back to the default file.  This mechanism is susceptible to races with
+link creation and removal; to avoid incorrect fallback, distributors are
+required either to deliver all distribution-specific files as regular files
+rather than symbolic links or to guarantee that every symbolic link in `/dist`
+and `/usr/dist` points to an extant file with appropriate ownership and access
+modes at all times.
+
+Callers wishing to execute the distribution-specific file should set `O_EXEC`
+in `oflag` and pass the resulting file descriptor to `fexecve`.  Callers
+should not fall back to a distribution-independent `default` file if reading
+or executing from the file descriptor subsequently results in an error.
+

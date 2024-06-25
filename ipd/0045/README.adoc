@@ -1,0 +1,971 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Kyle Simpson <kyle@oxide.computer>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 45 – Flow trees in the MAC datapath
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+This document outlines a proposal for restructuring the MAC datapath using trees of flow entries, in contrast with the flat two-layer classifier we have today.
+Packet processing will follow a conceptual flow tree -- each node has match criteria, an action, and resource properties.
+Rings then point into this tree via their matched softring set (SRS).
+Clients (i.e., `dls`) will create and manage all flows above the unicast client handles.
+
+This will enable a few new capabilities:
+
+. Rings will be able to represent a wider range of 'hardware classified' scenarios. Today, Rx rings exclusively represent L2/DMAC classification. Modern NICs allow for one-to-one & many-to-many traffic classes to target Rx Queues/rings on richer criteria.footnote:[We're not yet considering a MAC provider interface for requesting such rings, or a flow-level API for specifying which levle of hardware classification is needed.]
+. The datapath will be able to better support mixed hardware/software classification. A destination {ring, softring set, flow entry} can represent what work is already done, and a flow tree informs the datapath as to what classification work remains to be handled in software.
+. Flows created by tools such as `flowadm` can be better integrated with performance enhancements such as fanout, ring poll threads, squeue polling, and DLS bypass.
+. Nested bandwidth limits between `flowadm` flows and links may now be simultaneously enforced.
+. MAC can expose to its clients (and to their clients in turn) direct control over what actions should be taken for traffic, as well as softring polling capabilities. This will eventually make it possible for `ip` to delegate portions of received traffic to other modules _as early in the stack as possible_ (e.g., software routers handling encapsulated traffic on a given address).
+
+Conceptually, this allows us to clean up how DLS bypass works today.
+The existing TCP/UDP/OTH split is itself a form of classification, albeit one built intrusively into *every* softring set, which is incompatible with `flowadm`/user flows.
+By converting this bypass into just another flow, `dls` is able to control how user-specified resource limits interact with this core performance enhancement.
+This should also make the design of future fastpaths, such as IPv6, similarly less intrusive.
+
+This IPD summarises key points on how MAC works today with flows, and key performance enhancements we need to maintain, before discussing the conceptual model of flows and an implementation proposal.
+
+== Background
+
+This section offers an overview of the structure of the MAC datapath, issues in the existing flow system, and summarises how higher-level clients use MAC to achieve higher throughput.
+
+=== Datapath overview
+
+The MAC datapath today is a 2-layer packet classifier, which is ultimately responsible for routing packets from MAC providers (drivers) to higher-level clients such as `dls`.
+
+The first layer exclusively handles L2 semantics via a "flow table" construction.
+This layer is skipped if the ring a packet arrives on is "hardware classified", a label which is stored in an `enum` value on the ring itself.
+Hardware classification is available when no clients/links are forced to share rings or groups.footnote:[An exclusive link will have several rings/groups by default. The 'default' group will hardware-classify broadcast/unicast packets, and one or more rings will be allocated for matches on the unicast MAC address.]
+
+The second layer contains L3/L4 flows when configured by a user using the `flowadm` tool, which are today intended for specifying bandwidth limits and prioritisation of traffic classes. This layer is dynamically enabled/disabled on a per-client basis by changing the upcall function pointer attached to the ring/softring set.
+
+In the interrupt context, this looks like:
+
+[code]
+----
+              ┌───────────────┐
+              │  mac_rx_ring  │
+              └───────────────┘
+                      │
+                      ▼
+              ┌───────────────┐
+              │    mac_rx     │
+              └───────────────┘
+                      │
+                      ▼
+              ┌───────────────┐   <NOTE>: Mostly packet
+(and promisc) │ mac_rx_common │────┐chain preserving.
+              └───────────────┘    │
+                      │       SW   │    ┌─────────────┐
+  HW class via:       │    classif.└───▶│ mac_rx_flow │
+ srs_rx.sr_lower      │                 └─────────────┘
+      _proc           │                        │ via flent->fe_cb_fn
+                      ▼                        ▼
+ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ╦ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ═ ╦ ═ ═ ═ ═ ═ ═
+                         │                             │
+                         │             Exists subflows │
+         !Exists subflows│       ┌─────────────────────▼────┐
+                         │       │mac_rx_srs_subflow_process│
+                         │       └──────────────────────────┘
+                         │                     │<NOTE>: Mostly packet
+            ┌────────────▼─────────────┐       │  chain preserving.
+            │    mac_rx_srs_process    │◀──────┘
+            └──────────────────────────┘
+                          │
+                          └───────────────┐
+                                          ▼
+ (if !SRST_NO_SOFT_RINGS)        ┌────────────────┐
+              ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─│mac_rx_srs_drain│
+              ▼                  └────────────────┘
+ ┌─────────────────────────┐              │         via
+ │mac_rx_srs_(proto_)fanout│                  srs_rx->sr_func
+ └─────────────────────────┘              │
+              │                  ┌────────▼────────┐
+               ─ ─ ─ ─ ─ ─ ─ ─ ─▶│ mac_rx_deliver  │
+          via                    └─────────────────┘
+      softring->                          │ via mcip->mci_rx_arg
+    s_ring_rx_func                        ▼
+                                 ┌─────────────────┐
+                                 │ mac_rx callback │
+                                 │       on        │
+                                 │  *parent MCIP*  │
+                                 └─────────────────┘
+----
+
+L2 flows are handled via `mac_rx_flow`, while L3/4 flows are handled by dynamically replacing `mac_rx_srs_subflow_process` as the callback in both L2 processing paths.
+These mechanisms are used to sort packets into the correct softring set (SRS).
+Today, each L2 flow and each L3/L4 flow have separate SRSes.
+The `mac_rx` callback is almost universally set to `i_dls_link_rx`.
+
+The datapath allows for bandwidth limits to be imposed on each classifier.
+This occurs via a bandwidth control struct attached to the SRS, and by updating the `srs_drain_func` to `mac_srs_drain_bw`.
+Bandwidth control structs are shared and lockable resources, as several rings may correspond to the same L2 class and be subject to a shared limit.
+L3/4 flow-bound packets are pointed into separate SRSes by `mac_rx_srs_subflow_process` before bandwidth limiting is a consideration.
+As a consequence this excludes L3/4 flow traffic from existing L2 bandwidth controls, and vice versa.
+
+=== Issues with user flows today
+User flows are a useful tool for prioritising or limiting traffic. However, they have questionable interplay with other parts of the datapath.
+
+* User flows are rendered ineligible for DLS bypass (as they exist on a separate SRS from the main rings) and fanout (as this SRS has no softrings). The only destination is `dls` (typically via `mac_rx_deliver => i_dls_link_rx`).
+* Adding user flows disables polling of hardware L2-classified packets by a dedicated thread. Accordingly interrupts are not masked, increasing the CPU cost of handling high-throughput network traffic (and limiting maximum throughput).
+* There is no built-in support for hardware classification. The original crossbow proposal document lists this as future work. <<crossbow>>
+* Types of user flows are mutually exclusive on a link. Because the subflow table is flat in structure, meaningfully combining filters such as `(UDP => high-prio)` and `(ip_src ∈ 65.4.0.0/16 => BW<0.1 + low-prio)` is non-trivial and disallowed.
+* MAC resource properties can be set and assigned to MAC flows to control/specify their CPU fanout behaviour. They are never used in the datapath, as packets will always be processed in-line by the thread servicing the interrupt.
+
+=== Packet delivery and threads
+
+In the standard receive datapath we have several threads and packet queues:
+
+* One hardware poll thread per ring. This runs `mac_rx_srs_poll_ring` and feeds packets into the SRS. _Disabled if user flows installed._
+* One SRS worker thread per SRS. This runs `mac_srs_worker` (typically calling `mac_rx_srs_drain`), splits packets from the SRS queue into TCP/UDP/OTH, and places packets into each softring.
+* One softring worker thread per softring (stem:[=3n] for stem:[n]-way fanout). This runs `mac_soft_ring_worker`, then `mac_rx_soft_ring_drain` -> `s_ring_rx_func`.
+
+Generally, any layer (including the interrupt context) is free to process packets in-line without waking the next layer while load is low to reduce latency.
+
+=== DLS bypass and SQueue polling setup[[squeue-setup]]
+
+Partial stack bypass--i.e., allowing packets to shortcut past `dls` and into `ip`--is a necessary part of ensuring higher network throughput in illumos today.
+Although we will want to define 'an action' for each flow entry (which suits DLS bypass for UDP), TCP SQueue polling is sensitive to the presence, arrival, departure, and CPU binding of each ring associated with a flow entry/SRS.
+
+A key part of how SQueue polling works today is an override of some dedicated function handlers on the MAC client, which are a family of ring event notifications (`mcip->mci_resource_*`).footnote:[The prominence and naming of the resource APIs would imply that they are used for *all* rings rather than just TCP proto-rings.]
+Both performance enhancements then set the direct receive function set on each applicable softring (`softring->s_ring_rx_func = mcip->mci_direct_rx_fn` => `ip_input`).
+Today, these are:
+
+.mac.h
+[source,c]
+----
+/* existing */
+typedef void    (*mac_direct_rx_t)(void *, mac_resource_handle_t,
+        mblk_t *, mac_header_info_t *);
+
+typedef mac_resource_handle_t (*mac_resource_add_t)(void *, mac_resource_t *);
+typedef int     (*mac_resource_bind_t)(void *,
+    mac_resource_handle_t, processorid_t);
+typedef void      (*mac_resource_remove_t)(void *, void *);
+typedef void      (*mac_resource_quiesce_t)(void *, void *);
+typedef void      (*mac_resource_restart_t)(void *, void *);
+typedef int     (*mac_resource_modify_t)(void *, void *,
+            mac_resource_t *);
+typedef void      (*mac_change_upcall_t)(void *, mac_direct_rx_t,
+    void *);
+----
+
+.mac_client_impl.h
+[source,c]
+----
+struct mac_client_impl_s {      /* Protected by */
+  /* ...existing... */
+
+  mac_direct_rx_t   mci_direct_rx_fn; /* SL */
+  void      *mci_direct_rx_arg; /* SL */
+
+  /* Resource Management Functions */
+  mac_resource_add_t  mci_resource_add; /* SL */
+  mac_resource_remove_t mci_resource_remove;  /* SL */
+  mac_resource_quiesce_t  mci_resource_quiesce; /* SL */
+  mac_resource_restart_t  mci_resource_restart; /* SL */
+  mac_resource_bind_t mci_resource_bind;  /* SL */
+  void      *mci_resource_arg;  /* SL */
+
+  /* ...existing... */
+}
+----
+
+At a high level, this datapath is set up by:
+
+. `mac_softring_create` x3 [TCP, UDP, OTH].
+. each create initialises `s_ring_rx_func = mac_rx_deliver`.
+. for [TCP, UDP]:
+.. call `mac_soft_ring_dls_bypass`
+... sets `s_ring_rx_func = mcip->mci_direct_rx_fn` (`= ip_input`)
+... sets `s_ring_rx_arg1 = mcip->mci_direct_rx_arg` (`= <ill ptr for mac client>`).
+. for [TCP]:
+.. call `mci_resource_add` -- this calls into `ip`, and returns the `s_ring_rx_arg2` for `s_ring_rx_func` (e.g., the target SQueue).
+
+The client flow mechanism we want to expose *must* allow _optional_ control over similar ring event callbacks on a per-flow-entry basis.
+
+== High-level Proposal
+
+I propose we move from a fixed 2-layer classifier to an n-layer tree classifier.
+Conceptually, this is a tree of flow entries as they are defined in illumos today (`flow_entry_t`)--where they will differ is a new `fa_action` field, with additional pointers holding sibling/parent/child relationships.
+Each softring set will now only contain a single list of softrings, without explicitly bundling all of TCP/UDP/OTH within the struct.
+This allows us to conceptually unify flow and 'subflow'/`flowadm` logic, with consistent bandwidth limiting behaviour and support for non-L2 Rx queues.
+
+=== Worked example
+
+To explain, we've suggested this will allow us to better express DLS bypass using flows.
+How would this look for a single link on a NIC, receiving hardware classified packets on one ring?
+
+If we break this into a hierarchy of flows (omitting parent pointers and statistics):
+
+[code]
+----
+  S/W   ║
+ class  ║        ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+   ──┐  ║   root │NUL::::::│NUL::│*     │NUL│freemsgchain│NUL::│
+     └─▶║        └─────────┴─────┴──────┴───┴────────────┴─────┘
+        ║                            │
+                       ┌─────────────┘
+  H/W   ║              ▼                                           l2 mcast
+ class  ║         ┌Softring─┬Flow─┬Child─┬BW─┬Action────────┬Next─┐  ...
+   ──┐  ║l2 ucast │list[4]  │*──▶ │*     │NUL│mac_rx_deliver│*    │───────▶
+     └─▶║         └─────────┴─────┴──────┴───┴──────────────┴─────┘
+(via ring)                            │
+              ┌───────────────────────┘
+              ▼
+         ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+v4/6-tcp │list[4]  │*──▶ │NUL:::│NUL│ip_input    │*    │
+         └─────────┴─────┴──────┴───┴────────────┴─────┘
+                                                    │
+                               ┌────────────────────┘
+                               ▼
+                          ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+                 v4/6-udp │list[4]  │*──▶ │NUL:::│NUL│ip_input    │NUL::│
+                          └─────────┴─────┴──────┴───┴────────────┴─────┘
+----
+
+Rather than hardcoding the classes used for DLS bypass, each can be made its own flow and SRS, mapped to an action.
+This works by modifying `mac_rx_srs_process` such that packets are classified from a root node down to their destination SRS/callback pair.
+Rings 'cut in' to the classification tree and specify the *root node* to use.
+We no longer demux along classifier paths using function callbacks -- `mac_rx_srs_process` is always called using a root node.
+
+* If we are hardware classified, we can set this to the node 'l2 ucast'. We do not visit siblings of the root node, so 'l2 mcast' is ignored.
+* If we are software classified, we set this to the node 'root'.
+
+What would our overall datapath block diagram look like as a result?
+Considering this from both the interrupt and worker thread contexts (assuming our action is `mac_rx_deliver`):
+
+[code]
+----
+                    ┌───────────────┐      ┌─────────────┐
+                    │  mac_rx_ring  │◀═════│Interrupt Ctx│░
+                    └───────────────┘      └─────────────┘░
+                            │       mblk_t *░░░░░░░░░░░░░░░
+                            ▼
+                    ┌───────────────┐
+                    │    mac_rx     │
+                    └───────────────┘
+                            │
+                            ▼
+                    ┌───────────────┐
+      (and promisc) │ mac_rx_common │
+                    └───────────────┘
+                            │
+          HW class:         │       SW class:
+       root=mr->mr_srs      │ root=mip->flent_tree->fe_srs
+                            │
+                            │
+                            │                    root=mr->mr_srs
+              ┌─────────────▼────────────┐       ┌─────────────┐
+              │    mac_rx_srs_process    │◀══════│ Worker Ctx  │░
+              └──────────────────────────┘       └─────────────┘░
+                            │                     ░░░░░░░░░░░░░░░
+                            └────────────┐
+                                         │
+                                         ▼
+(if !SRST_NO_SOFT_RINGS)        ┌────────────────┐
+             ┌ ─ ─ ─ ─ ─ ─ ─ ─ ─│mac_rx_srs_drain│
+             ▼                  └────────────────┘
+┌─────────────────────────┐              │         via
+│mac_rx_srs_(proto_)fanout│                  srs_rx->sr_func
+└─────────────────────────┘              │
+             │                  ┌────────▼────────┐
+              ─ ─ ─ ─ ─ ─ ─ ─ ─▶│ mac_rx_deliver  │
+         via                    └─────────────────┘
+     softring->                          │ via mcip->mci_rx_arg
+   s_ring_rx_func                        ▼
+                                ┌─────────────────┐
+                                │ mac_rx callback │
+                                │       on        │
+                                │  *parent MCIP*  │
+                                └─────────────────┘
+----
+
+In the interrupt context, we arrive at the root node with a separate packet chain.
+In the worker thread context, we arrive at the root SRS with an attached packet chain retrieved by the polling thread.
+
+Packet chains are then handled via depth-first traversal from the root node.
+At each visited node:
+
+. Winnow down packet chain until BW is satisfied.
+. While `chain != NULL`.
+.. Select next child.
+.. Build a local chain of all packet matches for current child.
+.. Visit child with local chain.
+. Pass leftover packet chain to `mac_rx_srs_drain` -- this will fanout if needed, and either drain inline or leave for worker thread.
+
+Each callback is thus called only once with the largest possible packet chain, and any (sub)flow classifiers are only executed on the minimum applicable set of packets (rather than running all subflow classifiers on all packets as we do today).
+
+=== Flow entry action types
+
+A flow entry may have one of three classes of action:
+
+- Drop -- No softrings/threads allocated. Statistics are counted before packets are instantly dropped via `freemsgchain`.
+- Action -- Packets are handled using a provided functon pointer and argument. Actions may have bespoke handlers for <<squeue-setup, resource/softring handling>> needed to enable features such as SQueue polling.
+- Delegate -- Packets are handled using the action of the matching flow's first non-delegate ancestor. See the <<subflow_deleg, followup section>>.
+
+In particular, delegation gives us the flexibility to express flows with, e.g., bandwidth and priority constraints that still feed back into the DLS bypass pathway.
+
+=== Dedicated H/W queues for subflows
+Rings today point directly at the SRS that matches their classifier.
+We can do *exactly the same* thing with finer-grained classes provided by modern NICs -- we point from the Rx ring to the correct flow/SRS in the tree, and treat this as our root node.
+
+Consider a subclass for UDP which uses hardware n-tuple filtering into a dedicated ring.
+Following MAC's structure today, we implement this as a software classification rule as well:
+
+[code]
+----
+  S/W   ║
+ class  ║        ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+   ──┐  ║   root │NUL::::::│NUL::│*     │NUL│freemsgchain│NUL::│
+     └─▶║        └─────────┴─────┴──────┴───┴────────────┴─────┘
+        ║                            │
+                       ┌─────────────┘
+  H/W   ║              ▼                                           l2 mcast
+ class  ║         ┌Softring─┬Flow─┬Child─┬BW─┬Action────────┬Next─┐  ...
+   ──┐  ║l2 ucast │list[4]  │*──▶ │*     │NUL│mac_rx_deliver│*    │───────▶
+     └─▶║         └─────────┴─────┴──────┴───┴──────────────┴─────┘
+(via ring)                            │
+              ┌───────────────────────┘
+              ▼
+         ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+v4/6-tcp │list[4]  │*──▶ │NUL:::│NUL│ip_input    │*    │
+         └─────────┴─────┴──────┴───┴────────────┴─────┘
+                                                    │
+                               ┌────────────────────┘
+                               ▼
+                          ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+                 v4/6-udp │list[4]  │*──▶ │*     │NUL│ip_input    │NUL::│
+                          └─────────┴─────┴──────┴───┴────────────┴─────┘
+                                              │
+                               ┌──────────────┘
+  H/W   ║                      ▼
+ class  ║                   ┌Softring─┬Flow─┬Child─┬BW─┬Action──────┬Next─┐
+   ──┐  ║ geneve (udp,6081) │list[4]  │*──▶ │NUL:::│NUL│geneve_rx   │NUL::│
+     └─▶║                   └─────────┴─────┴──────┴───┴────────────┴─────┘
+(via ring)
+----
+
+We thus have a valid software classification pathway to this flow if needed, but when hardware classified we can start at the new 'geneve' node and immediately perform fanout.
+Moreover, we don't care about ancestor nodes at all if bandwidth limits are not configured AND a node has its own softrings & action.
+
+Ideally, we should also be able to mask the Geneve flow while a hardware classifier exists, such that UDP packets arriving on 'l2 ucast' will never be checked against that flow entry.
+
+=== Subflow Action Delegation[[subflow_deleg]]
+
+In the case that we want to use subflows to track statistics or impose bandwidth limits, we do not want to lose the performance benefits of DLS bypass.
+A tree node having a `NUL` action should use the action of its first valid ancestor flow entry, after/as they are included in flowstats and bandwidth limits.
+Logically we are walking up the tree--in practice, we can treat such a flow's softrings as though they belong to that ancestor and set `s_ring_rx_func` accordingly.
+
+=== Bandwidth Limiting
+
+When handling a packet chain, we must consider bandwidth limits from the tree root down to whichever node a packet is delivered on.
+In the software classification case, the above pseudo code for a node visit solves this issue.
+
+When hardware classification is in play we should track at each node whether any ancestors are imposing BW limits using a boolean variable on each tree node.
+If this is set, we store handles to all non-null `bw_ctl_t` objects from ancestors at each SRS to limit traffic and update/check them accordingly.
+This is needed to account for, e.g., a packet chain which arrives at the tail of `L2 -> UDP -> [UDP + 6081]` when bandwidth limits are set on L2 or UDP.
+
+When any packet is denied based on a bandwidth limit, we track counts/sizes on a per-layer basis and remove those packets in waves from any modified ancestor classifiers to limit lock contention.
+
+== Implementation
+
+We discuss here a mixture of simplifications for an initial implementation, API sketches, and outline pseudocode for the intended state of packet processing logic to indicate locking behaviour.
+
+=== Simplifying assumptions
+* Nodes of a flent tree should be *ordered* following the OSI layers.
+  - We do not require a tree node per protocol layer, only to constrain valid parent-child relationships for initial implementation.
+  - E.g. `(ROOT)->(DMAC=00:aa:bb:...)->(UDP_DPORT=80)` is a valid flow hierarchy even though IP is excluded, but `(ROOT)->(DEST_IP=80)->(DMAC=00:aa:bb:...)` is invalid. This may need to be relaxed in future depending on the hardware classification capability of various NICs.
+  - However, a ring may *start* having matched one or more layers (e.g., L2 + UDP).
+  - Encapsulation, if eventually needed, can be treated as a higher set of layers.
+  - This does not prevent (user-)flows from cutting into an existing tree, or placing further limits on an existing flow. E.g., a client should be able to insert a flow limiting traffic to/from a remote IP into an existing tree having (L2 MAC) -> (L4 UDP, L4 TCP). Equally, a flowadm flow should be able to specify a bandwidth limit on UDP/TCP in concert with an existing flent used for DLS bypass.
+* A flow will not yet be able to have its registered action changed after it is created.
+* Defining and using a MAC provider API to create rings which point past L2, or for them to be explicitly managed outside of MAC by its clients is out of scope.
+
+=== APIs for MAC clients
+
+==== Flow creation and action assignment
+
+As <<squeue-setup, discussed earlier>>, partial stack bypass requires the use of dedicated callbacks which alert higher-level clients (`ip`) of the arrival, departure, and use of particular softrings.
+To enable flent-level actions, these handlers need to be moved up from the client to the individual flow entry, so that they can be targeted onto the rings added to that individual flent.
+The goal is to democratise this functionality.
+
+Softrings bound to TCP require the full gamut of these APIs (see `dld_capab_poll_s`, `ip_squeue_add_ring`), but remaining softrings who are not delegating to another flent only require a function pointer and args.
+For now we will not remove the resource management functions from `mac_impl_t`, but will replace them with fixed functions which find and use the `flow_action_t` relevant to a ring.
+We have three cases to consider then between 'Action' and 'Delegate':
+
+. Flows created with no explicit action, which will instead deliver packets using an ancestor flent's action.footnote:[This is always safe in principle given that the tree will always have `freemsgchain` as a root action.]
+. Flows which practically require only a function pointer and client resource (e.g. UDP, XDE),
+. Flows which need to set and act upon per-ring resources/cookies (e.g. TCP).
+
+We can achieve this and drop using an action format like the below:
+
+.mac_flow.h
+[source,c]
+----
+#define MFA_FLAGS_ACTION 0x01
+#define MFA_FLAGS_RESOURCE 0x02
+
+typedef struct flow_action_s {
+  uint32_t fa_flags;
+
+  /*
+   * Function pointer used to handle each inbound packet when
+   * `MFA_FLAGS_ACTION` is set. This controls `s_ring_rx_func/arg1`
+   * on each softring.
+   *
+   * If this flag is not set, the flow will delegate packet processing
+   * to its first ancestor with a valid action.
+   *
+   * If this flag is set, a NULL `fa_direct_rx_fn` will drop any packets
+   * via `freemsgchain`.
+   */
+  mac_direct_rx_t   fa_direct_rx_fn;
+  void      *fa_direct_rx_arg;
+
+  /*
+   * Used when MFA_FLAGS_RESOURCE is set alongside MFA_FLAGS_ACTION.
+   *
+   * This exposes existing functionality used for DLS bypass to inform
+   * a client about softring creation/deletion, CPU bindings and to
+   * enable/disable/perform softring polling.
+   */
+  mac_resource_add_t  fa_resource_add; /* SL */
+  mac_resource_remove_t fa_resource_remove;  /* SL */
+  mac_resource_quiesce_t  fa_resource_quiesce; /* SL */
+  mac_resource_restart_t  fa_resource_restart; /* SL */
+  mac_resource_bind_t fa_resource_bind;  /* SL */
+  void      *fa_resource_arg;  /* SL */
+} flow_action_t;
+
+/*
+ * Now expose flent handles where appropriate.
+ * This is the opaque form of flow_entry_t.
+ */
+typedef flow_entry_handle_t void*;
+
+/* Removed */
+/* ---
+int
+mac_link_flow_add(datalink_id_t linkid, char *flow_name,
+    flow_desc_t *flow_desc, mac_resource_props_t *mrp);
+--- */
+
+/* --- NEW --- */
+
+/* NOTE: the expectation is that these fns will manage the MAC perimeter and
+ * quiesce since they may mandate rewriting the flent tree.
+ */
+
+/* Creates a new flow within the flent tree of a given MAC client. */
+int
+mac_client_flow_add(mac_client_handle_t mch, flow_desc_t *fd,
+    mac_resource_props_t *mrp, char *name, flow_action_t *action,
+    flow_entry_handle_t *flentp);
+
+mac_client_flow_destroy(flow_entry_handle_t flentp);
+
+/* We're assuming for now that actions on flows are immutable. */
+
+/* make public: */
+extern uint32_t mac_flow_modify_props(flow_entry_handle_t, mac_resource_props_t *);
+
+----
+
+==== 'User/flowadm flows' as a DLS-level concept
+
+Note that we no longer need to store or concern ourselves about the difference between a 'user' (`flowadm`) and a 'client' (`mch`) action.
+DLS as a client should now be responsible for tracking the flows it creates which fall into the 'user' bucket, just as it will now be responsible for creating the DLS bypass as another set of flows on top of the unicast flows managed by MAC itself.
+
+.mac_flow_impl.h
+[source,c]
+----
+/*
+ * We need to be able to differentiate flows according to who created them.
+ * Intent: no client can touch MF_TYPE_MAC, this api creates MF_TYPE_CLIENT.
+ * This controls who can see (and delete) which flows.
+ *
+ * The alternative is that we repurpose (!FLOW_USER) vs. (FLOW_USER) to
+ * capture this.
+ */
+typedef enum {
+  MF_TYPE_MAC,
+  MF_TYPE_CLIENT,
+} mac_flow_type_t;
+
+/* changed -- internal API */
+int
+mac_flow_create(flow_desc_t *fd, mac_resource_props_t *mrp, char *name,
+    void *client_cookie, uint_t type, mac_flow_type_t owner_type,
+    flow_action_t *action, flow_entry_t **flentp);
+----
+
+The distinction which matters to MAC is now, instead, which flows are owned by itself versus those owned by clients.
+
+==== Flow resource limiting
+
+MAC resource properties (fanout, CPU assignments, bandwidth limits) already work in a way compatible with what we want -- they are currently split between `fe_resource_props` and `fe_effective_props`.
+We want to establish that:
+
+. A flow with an action which does not specify resource properties will have the *CPU-based properties* autocomputed, as occurs today.footnote:[I'm torn on whether this should inherit the effective properties of the parent instead.] We will not construct another bandwidth limit, even if we choose to inherit a parent's CPU bindings etc.
+. A flow with an action which does specify resource properties will autocompute them, as occurs in datapath setup today.
+. Resource properties are discarded for any 'Drop' action.
+. Resource properties are upheld for any 'Delegate' action.
+
+==== Enabling flow-based delivery with existing datastructures
+SRSes and flow entries require some minor changes to allwo for these changes.
+For stem:[n]-way fanout, an SRS should now contain exactly stem:[n] softrings rather than stem:[3n].
+Each will still maintain one packet list for delivery from the poll thread and interrupt context -- these packets are *unclassified* and, if needed, must now undergo further software classification (against children) and bandwidth checks (against parents).
+
+To minimise unnecessary walks of the flow tree, each SRS contains the bw_ctl of its matching flent, and that flent's ancestors.
+In the case of flents with a 'delegate' action, we remove the need to walk ancestor nodes by <<ac-del-impl, treating softrings as though they belong to the chosen ancestor>>.
+
+.mac_soft_ring.h
+[source,c]
+----
+/* REMOVE
+#define ST_RING_TCP   0x0004
+#define ST_RING_UDP   0x0008
+#define ST_RING_OTH   0x0010
+*/
+
+/* --- NEW --- */
+#define MAX_BW_DEPTH 16
+/* --- NEW --- */
+
+struct mac_soft_ring_set_s {
+  /* --- existing relevant to proposal --- */
+  /*
+   * Common elements, common to both Rx and Tx SRS type.
+   * The following block of fields are protected by srs_lock
+   */
+  kmutex_t  srs_lock;
+  uint32_t  srs_type;
+  uint32_t  srs_state;  /* state flags */
+  uint32_t  srs_count;
+  mblk_t    *srs_first; /* first mblk chain or NULL */
+  mblk_t    *srs_last;  /* last mblk chain or NULL */
+  kcondvar_t  srs_async;  /* cv for worker thread */
+  kcondvar_t  srs_cv;   /* cv for poll thread */
+  kcondvar_t  srs_quiesce_done_cv;  /* cv for removal */
+  timeout_id_t  srs_tid;  /* timeout id for pending timeout */
+
+  /*
+   * The following blocks are write once (WO) and valid for the life
+   * of the SRS
+   */
+  struct mac_client_impl_s *srs_mcip; /* back ptr to mac client */
+  void      *srs_flent; /* back ptr to flent */
+  mac_ring_t    *srs_ring;  /*  Ring Descriptor */
+
+  /* --- existing relevant to proposal --- */
+
+  /* ...rest... */
+
+  /* --- CHANGED/NEW --- */
+
+  /*
+   * Bandwidth control related members.
+   * Each SRS now holds a cached list of the BW ctl
+   * members of its flent and its ancestors in the tree.
+   * Updates to the flent tree must refresh this and handle
+   * swaps of the srs_drain_func.
+   */
+
+  mac_bw_ctl_t  *srs_bw[MAX_BW_DEPTH]; /* srs_lock */
+  /* --- mac_bw_ctl_t  *srs_bw; */
+  unint32_t srs_bw_len;
+
+  /* Attribute specific drain func (BW ctl vs non-BW ctl) */
+  mac_srs_drain_proc_t  srs_drain_func; /* updated atomically */
+  /* --- mac_srs_drain_proc_t  srs_drain_func; /* Write once (WO) * / */
+
+  /*
+   * List of soft rings & processing function.
+   * The following block is protected by Rx quiescence.
+   * i.e. they can be changed only after quiescing the SRS
+   * Protected by srs_lock.
+   */
+  mac_soft_ring_t *srs_soft_ring_head;
+  mac_soft_ring_t *srs_soft_ring_tail;
+  int   srs_soft_ring_count;
+  int   srs_soft_ring_quiesced_count;
+  int   srs_soft_ring_condemned_count;
+  /* ---
+  mac_soft_ring_t **srs_tcp_soft_rings;
+  int   srs_tcp_ring_count;
+  mac_soft_ring_t **srs_udp_soft_rings;
+  int   srs_udp_ring_count;
+  mac_soft_ring_t **srs_oth_soft_rings;
+  int   srs_oth_ring_count;
+  --- */
+  /* --- CHANGED/NEW --- */
+};
+typedef struct mac_soft_ring_set_s mac_soft_ring_set_t;
+----
+
+Each flow entry now includes pointers to its parents and siblings to support full software classification from the root, partial software classification for packets delivered on a ring, and action delegation and bandwidth enforcement for packets delivered on H/W rings:
+
+.mac_flow_impl.h
+[source,c]
+----
+/* Existing struct */
+typedef struct flow_entry_s flow_entry_t;
+struct flow_entry_s {         /* Protected by */
+  /* ... existing ignored ... */
+
+  /* --- existing relevant to proposal --- */
+  /* Properties as specified for this flow */
+  mac_resource_props_t  fe_resource_props;  /* SL */
+
+  /* Properties actually effective at run time for this flow */
+  mac_resource_props_t  fe_effective_props; /* SL */
+
+  kmutex_t    fe_lock;
+  char      fe_flow_name[MAXFLOWNAMELEN]; /* fe_lock */
+  flow_desc_t   fe_flow_desc;   /* fe_lock */
+  kcondvar_t    fe_cv;      /* fe_lock */
+  uint32_t    fe_refcnt;    /* fe_lock */
+
+  void      *fe_rx_srs[MAX_RINGS_PER_GROUP]; /* fe_lock */
+  int     fe_rx_srs_cnt;
+
+  /*
+   * BW control info.
+   * This is the BW state for this flent -- ancestors reached
+   * via self->fe_parent->fe_rx_bw etc.
+   */
+  mac_bw_ctl_t    fe_tx_bw;
+  mac_bw_ctl_t    fe_rx_bw;
+
+  /* flagset containing, e.g. FLOW_PRIMARY_MAC, FLOW_VNIC, FLOW_USER */
+  uint_t      fe_type;    /* WO */
+  /* --- existing relevant to proposal --- */
+
+  /* --- NEW --- */
+
+  /* Classifier tree pointers.  */
+  flow_entry_t *fe_parent;
+  flow_entry_t *fe_sibling;
+  flow_entry_t *fe_child;
+
+  /* used to generate flow_fn_t entries for each softring */
+  flow_action_t fe_action;
+
+  /* differentiate flows created by MAC / clients / flowadm */
+  mac_flow_type_t fe_owner_type;
+
+  /*
+   * Every flent needs a S/W classifier destination. This is itself
+   * a full-fledged SRS with workers/poll thrds matching the mrp.
+   * Guaranteed to exist.
+   */
+  void *fe_rx_srs_sw; /* fe_lock */
+
+  /*
+   * Q: What should happen with fe_cb_fn?
+   *    Keep, but with new unicast behaviour: see pseudocode section below.
+   *    This is used to handle both unicast and m/bcast flents.
+   *    broadcast flents are a pure MAC concept, so should never
+   *    be constructed through the user-facing APIs above.
+   *              UCAST               M/BCAST
+   * fe_cb_fn   = mac_rx_flent        mac_bcast_send
+   *              (formerly unicast to mac_rx_srs_process = sr_lower_proc)
+   * fe_cb_arg1 = FANOUT_PROTO        grp
+   * fe_cb_arg2 = self.fe_rx_srs_sw   NULL
+   */
+
+  /* --- NEW --- */
+};
+----
+
+==== Action delegation[[ac-del-impl]]
+
+As in the conceptual summary, a flow entry with no action set should use the first action defined when walking that flent's ancestors.
+This is a key part of allowing user/`flowadm` flows to simultaneously impose bandwidth or priority constraints on a subset of traffic, without excluding those flows from DLS bypass or being squeue pollable.
+
+While a flow entry _f_ delegates to another entry _f'_, its softring sets 'belong to' _f'_.
+In implementation terms, this means that:
+
+* The per-softring receive function `s_ring_rx_func` and its argument are set to _f'_'s `fa_direct_rx_fn` and `fa_direct_rx_arg` on each softring allocated by _f_.
+* If _f'_ is `MFA_FLAGS_RESOURCE`, then `fa_resource_add` is called when a softring is created. `fa_resource_remove` is called when _f_ is torn down, has an action configured directly, or an intermediate flent with a replacement action is inserted.
+
+For the initial implementation, packets will always be delivered to the software SRS allocated for the destination flent, which will have its own softrings and worker threads.
+In future it may make sense to deliver such packets to the parent's softrings if they already exist and have identical MAC resource controls set (thread priority, fanout count, CPU bindings).
+
+==== Modifications to the flent tree
+Broadly, we want to follow (I think) the same strategy as today when adding a new client, u'cast, or b'cast to a device:
+
+. Acquire the MAC perimeter.
+. Quiesce all traffic on the device.
+. Acquire write lock on the flent tree.
+. For the duration of any modification to an SRS (action recompute, update BW ctl lists), acquire the lock on that SRS.
+
+This is necessary because the addition/removal of flents, SRSs, and softrings will require that we regenerate `srs_bw` lists, and inform clients about resource addition/removal.
+
+Each change to the flent tree requires that we recompute, for each affected SRS, its list of `bw_ctl` handles and any delegated actions--including quiescing, removing, and adding resource handles for client flows.
+
+=== Packet processing pseudocode
+Generally, the assumption is that the majority of a flent tree (barring statistics) will be read-only while traffic on a link is not quiesced.
+This leaves us with the following shared resources on each SRS:
+
+* Bandwidth control objects, between all threads responsible for SRS drain.
+* SRS packet lists, used as a channel between {SRS poll thread, full-classed from other worker} -> (SRS worker).
+* Soft ring packet lists, used as a channel between (SRS worker) -> (Softring worker).
+
+We can hash out some of these interactions (and reiterate existing ones) in more detail via pseudocode.
+The vast majority of new detail is in `mac_rx_srs_drain` / `mac_rx_srs_drain_bw` -- several functions are described as a simplified version of their operation today to give a holistic view.
+
+[source,python]
+----
+# Per-ring poll thread
+#
+# Deliver packets to SRS worker thread, may process inline (elided).
+def mac_soft_ring_poll(ring):
+  while True:
+    pkts = poll(ring)
+    if pkts == NULL:
+      continue
+
+    lock(ring->srs->srs_lock)
+    append(
+      pkts,
+      [ring->srs->srs_unclass_first, ring->srs->srs_unclass_last]
+    )
+    unlock(ring->srs->srs_lock)
+
+# Entry point for worker thread.
+def mac_srs_worker(srs):
+  # Eliding some details around tick-scheduling
+  # if bw-limited and bw-enabled.
+  while True:
+    lock(ring->srs->srs_lock)
+    # either mac_rx_srs_drain or mac_rx_srs_drain_bw
+    if (srs->srs_unclass_first != NULL or srs->srs_class_first != NULL):
+      srs->srs_drain_func(srs, SRS_WORKER)
+    else:
+      await(srs->sr_async)
+    unlock(ring->srs->srs_lock)
+
+# Entrypoint in interrupt context
+def mac_rx_common(mac, ring, pkts):
+  if (ring != NULL):
+    lock(ring->mr_lock)
+      if (ring->class = HW_CLASS):
+        mac_rx_srs_process(_, ring->srs, pkts, False)
+    unlock(ring->mr_lock)
+    return
+  else:
+    # single client w/o ring
+    rw_lock(mac->mi_rw_lock, READ)
+    flent = mac->xxx->yyy
+    refhold(flent)
+    rw_unlock(mac->mi_rw_lock, READ)
+
+    # actually fe_cb_fn.
+    mac_rx_srs_process(_, flent->sw_srs, pkts, False)
+    refrele(flent)
+
+  # sw class.
+  mac_rx_srs_process(_, mac->root_srs, pkts, False)
+
+# Drop packets off at an SRS, possibly process them.
+def mac_rx_srs_process(_unused, srs, pkts, is_loopback):
+  lock(srs->srs_lock)
+  append(
+    pkts,
+    [srs->srs_unclass_first, srs->srs_unclass_last]
+  )
+  if (SRS_PROC ∉ srs->state and not loopback and not stack_too_deep):
+    # either mac_rx_srs_drain or mac_rx_srs_drain_bw
+    srs->srs_drain_func(srs, SRS_PROC_FAST)
+  unlock(srs->srs_lock)
+
+# adapter to support both fanout and broadcast on same fn sig
+def mac_rx_flent(fanout_method, srs, pkts, is_loopback):
+  assert(not is_loopback)
+
+  # NOTE: neither of these methods require that we hold, e.g., an SRS lock on call.
+  if fanout_method == FANOUT_SRC_IP:
+    mac_rx_srs_fanout(srs, pkts)
+  else:
+    mac_rx_srs_proto_fanout(srs, pkts)
+
+# Note: we enter these with the lock because we need to tell the world
+# the SRS is busy. This is the behaviour observed today.
+# We cannot reasonably hold the lock for the duration of
+# packet processing as we hop between flents.
+def mac_rx_srs_drain(srs, proc_type):
+  # srs locked
+  set(srs->state, SRS_PROC | proc_type)
+  (unclass_head, unclass_tail) = (srs->srs_first, srs->srs_last)
+  (srs->srs_first, srs->srs_last) = (NULL, NULL)
+
+  held_flents = [NULL; 16] # arbitrary limit
+  owned_pkts = [(NULL, NULL); 16] # arbitrary limit
+  to_refund = [(0, 0); 16] # arbitrary limit
+
+  flent = srs->flent
+  refhold(flent)
+  unlock(srs->srs_lock)
+
+  held_flents[0] = flent
+  owned_packets[0] = (unclass_head, unclass_tail)
+  depth = 0
+  ascended = False
+
+  # This is a depth-first traversal, where each layer draws
+  # from the packets matched to its parent. It delivers entire packet
+  # chains on return to a node if it has a subtree, else on visit.
+  while depth >= 0:
+    curr_flent = held_flents[depth]
+
+    # select packets for self from parent.
+    # depth 0 is already matched and bw checked against self/parents,
+    # and we don't redo this on a return visit
+    if depth > 0 and not ascended:
+      owned_packets[depth] = take_els(owned_packets[depth-1], curr_flent->match)
+      if curr_flent->bw_ctl:
+        lock(curr_flent->bw_ctl)
+        (admitted, denied_pkts) = split_els(owned_packets[depth], check_bw(...))
+        unlock(curr_flent->bw_ctl)
+        to_refund[..depth] += (len(denied_pkts), msglen(denied_pkts))
+
+    if ascended || curr_flent->fe_child == NULL:
+      # passed all relevant packets onto our subtree,
+      # or there is no subtree
+
+      # refund bw credits
+      lock(curr_flent->bw_ctl)
+      refund_bw(curr_flent->bw_ctl, to_refund[depth])
+      unlock(curr_flent->bw_ctl)
+
+      # Deliver packets to the SRS assigned to the HW ring if
+      # we're back at the root
+      arg2 = (depth == 0) ? srs : curr_flent->fe_cb_arg2
+
+      # in rx path, this cb_fn is either mac_rx_flent or mac_bcast_send.
+      # neither of these methods assume any locks are held.
+      # u'cast: `mac_rx_flent` => `s_ring_rx_func` will eventually be called.
+      #         this will either be a wrapper of `freemsgchain` (drop),
+      #         or the resolved action for a flent (explicit action / delegate).
+      (curr_flent->fe_cb_fn)(
+        curr_flent->fe_cb_arg1, arg2, owned_packets[depth], False
+      )
+
+      if curr_flent->fe_sibling != NULL:
+        # move to sibling if possible
+        refhold(curr_flent->fe_sibling)
+        refrele(held_flents[depth])
+        held_flents[depth] = curr_flent->fe_sibling
+      else:
+        # ascend iff. no siblings left.
+        ascended = True
+        depth -= 1
+        refrele(held_flents[depth])
+
+    else:
+      # try and push down to child.
+      refhold(curr_flent->fe_child)
+      depth += 1
+      held_flents[depth] = curr_flent->fe_child
+
+  # NOTE: All packets are delivered at this point, as delegated flow entries
+  #       control the `s_ring_rx_func` on the softrings belonging to the
+  #       HW ring's SRS.
+
+  lock(srs->srs_lock)
+  unset(srs->state, SRS_PROC | proc_type)
+  # srs locked
+
+def mac_rx_srs_drain_bw(srs, proc_type):
+  # srs locked
+  set(srs->state, SRS_PROC | proc_type)
+
+  (unclass_head, unclass_tail) = (srs->srs_first, srs->srs_last)
+
+  last_allowed = [unclass_tail; srs->bw_ctl_len]
+
+  # Decrement credits, remove packets
+  for i, bw_ctl in enumerate(srs->bw_ctl[..srs->bw_ctl_len]):
+    my_tail = i == 0 ? unclass_tail : last_allowed[i - 1]
+    lock(bw_ctl)
+    for pkt in (unclass_head..my_tail):
+      if not bw_ctl_allows(bw_ctl, pkt):
+        last_allowed[i] = pred(pkt)
+        break
+    unlock(bw_ctl)
+
+  # Refund credits.
+  # (effectively same locking bhav, using last_allowed entries
+  # to return removed packets' allowances to each bw_ctl).
+
+  srs->srs_last = last_allowed[srs->bw_ctl_len - 1]
+
+  #
+  # main body of mac_rx_srs_drain on reduced unclass chain
+  #
+
+  unset(srs->state, SRS_PROC | proc_type)
+  # srs locked
+----
+
+This glosses over some behaviours we want to keep today, such as `srs_worker` being called in the interrupt context dropping off packets for the worker, threads sleeping in times of low throughput etc.
+In general, assume that the main interactions between the interrupt context, poll threads, worker threads (and when these are activated rather than using in-line packet processing) will *not* change.
+
+== Considerations in the Tx pathway
+
+XXX TODO
+
+* We aren't yet considering exactly what this entails on the Tx path, and how this feeds into bandwidth counting/limitation there. We probably don't always need e.g. a dedicated Tx ring for a subflow, even if we have one on Rx.
+
+== Project Plan
+
+The first goal, even if we don't have the means to plumb non-L2 hardware rings in, is that we should be in a place where we no longer spin up the proto classification rings during datapath setup.
+`DLD_capab_poll`/`DLD_capab_direct` should be the first true user of this API.
+
+XXX: double check
+
+. Rework datapath, but keep `mac_datapath_setup` as the primary install point of DLS bypass on proto-fanout flows etc.
+  * Special-case user flows to apply between l2 and OTH.
+. Remove proto-fanout flows from datapath setup, and have DLS construct them itself using the new API.
+. Push user-flow management up to DLS.
+. Expose an API on DLS to others to emplace their flows onto it (i.e., XDE).
+
+== Open Questions
+
+* Today, fanout relies on each SRS having *its own* set of stem:[m] softrings per bypass class. As written, this proposal does not yet answer how to ensure that each ring has dedicated softrings, which we desire to limit contention. How should we map from n rings with m-way fanout to e.g. n*m softrings in this scheme?
+* The work that would go into enabling `flowadm` and related tools to allow flow class mixing is likely out of scope at first.
+* How much 'organisation' of flent trees should be handled by MAC or delegated to the client? Is it the responsibility of `dls`/`ip` to ensure that a subflow path is semantically valid? I.e., who decides that placing `(UDP, port=x)` as a child of `(TCP)` is illegal?
+* How do we implement classification functions that are appropriately progressive on an on/off basis? E.g., we want classification of `(UDP, dport=x)` to only check `dport` if it is a child of `(UDP)`.
+* This design assumes 'classification' from a root SRS should probably be left to the worker thread, while poll thread logic should hopefully not change much. Is this a good assumption?
+* How do we reconcile a possible H/W classifier rule which is simply 'UDP' (lacking a specified IP version) with existing `(v4->udp)` and `(v6->udp)` flow chains?
+* Fanout (hash function) to softrings is based on two functions today -- proto fanout vs src-ip fanout. Do these always make sense, should we be able to replace them on a per-flent basis as part of `flow_action_t`?
+* The pseudocode maintains the single-client exception to prevent software classification -- how common is this today?
+
+[bibliography]
+== External References
+
+[[[crossbow]]] Sunay Tripathi _et al._ Crossbow: Network Virtualization & Resource Partitioning https://illumos.org/opensolaris/ARChive/PSARC/2006/357/revised.materials/Crossbow_Design_Doc.pdf

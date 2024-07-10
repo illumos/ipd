@@ -51,9 +51,9 @@ This IPD summarises key points on how MAC works today with flows, and key perfor
 
 This section offers an overview of the structure of the MAC datapath, issues in the existing flow system, and summarises how higher-level clients use MAC to achieve higher throughput.
 
-=== Datapath overview
+=== Receive datapath overview
 
-The MAC datapath today is a 2-layer packet classifier, which is ultimately responsible for routing packets from MAC providers (drivers) to higher-level clients such as `dls`.
+The MAC Rx datapath today is a 2-layer packet classifier, which is ultimately responsible for routing packets from MAC providers (drivers) to higher-level clients such as `dls`.
 
 The first layer exclusively handles L2 semantics via a "flow table" construction.
 This layer is skipped if the ring a packet arrives on is "hardware classified", a label which is stored in an `enum` value on the ring itself.
@@ -328,7 +328,7 @@ A flow entry may have one of three classes of action:
 
 In particular, delegation gives us the flexibility to express flows with, e.g., bandwidth and priority constraints that still feed back into the DLS bypass pathway.
 
-=== Dedicated H/W queues for subflows
+=== Dedicated H/W queues for subflows[[dedi-queues]]
 Rings today point directly at the SRS that matches their classifier.
 We can do *exactly the same* thing with finer-grained classes provided by modern NICs -- we point from the Rx ring to the correct flow/SRS in the tree, and treat this as our root node.
 
@@ -372,6 +372,11 @@ We thus have a valid software classification pathway to this flow if needed, but
 Moreover, we don't care about ancestor nodes at all if bandwidth limits are not configured AND a node has its own softrings & action.
 
 Ideally, we should also be able to mask the Geneve flow while a hardware classifier exists, such that UDP packets arriving on 'l2 ucast' will never be checked against that flow entry.
+
+Note that the use of a single shared tree here is illustrative.
+Doing so leads to a regression from how softrings are allocated today (except for `flowadm` flows) by forcing fan-in to a fixed number of DLS bypass softrings, and particularly harms the multi-ring case.
+In practice, we aim to prebuild a tree for each entrypoint SRS (per-Rx Ring, Tx SRS on the MAC client, and the software classifier) with its own separate set of softrings.
+This is described <<arch-diff,in more detail>> as part of the implementation section.
 
 === Subflow Action Delegation[[subflow_deleg]]
 
@@ -427,6 +432,11 @@ We can achieve this and drop using an action format like the below:
 ----
 #define MFA_FLAGS_ACTION 0x01
 #define MFA_FLAGS_RESOURCE 0x02
+/*
+ * Used to signify that a flow entry should not be created
+ * for stats/bandwidth tracking in the Tx pathway.
+ */
+#define MFA_FLAGS_RX_ONLY 0x04
 
 typedef struct flow_action_s {
   uint32_t fa_flags;
@@ -535,7 +545,7 @@ We want to establish that:
 . Resource properties are upheld for any 'Delegate' action.
 
 ==== Enabling flow-based delivery with existing datastructures
-SRSes and flow entries require some minor changes to allwo for these changes.
+SRSes and flow entries require some minor changes to allow for these changes.
 For stem:[n]-way fanout, an SRS should now contain exactly stem:[n] softrings rather than stem:[3n].
 Each will still maintain one packet list for delivery from the poll thread and interrupt context -- these packets are *unclassified* and, if needed, must now undergo further software classification (against children) and bandwidth checks (against parents).
 
@@ -715,16 +725,28 @@ In implementation terms, this means that:
 For the initial implementation, packets will always be delivered to the software SRS allocated for the destination flent, which will have its own softrings and worker threads.
 In future it may make sense to deliver such packets to the parent's softrings if they already exist and have identical MAC resource controls set (thread priority, fanout count, CPU bindings).
 
-==== Modifications to the flent tree
-Broadly, we want to follow (I think) the same strategy as today when adding a new client, u'cast, or b'cast to a device:
+==== Modifications to the flent tree[[arch-diff]]
+As described above, each SRS assigned to H/W Rx rings, the client's Tx pathway, and to the client's software classifier must have a separate 'view' built from the logical flow entry tree.
+This is necessary to ensure correct (low-contention) fanout behaviour matching that which we have today.
+These are to be refreshed whenever the flow tree is altered (action changed, new/removed node, change in Mac resource properties), keeping existing softrings in place where possible.
+Having separate prebuilt views of the flow tree provides additional benefits:
+
+* This lets flows which only care about custom receive processing (DLS bypass) have no effect on the Tx pathway.
+* We may elide checks against flows we know to be H/W classified elsewhere. E.g., if `(UDP,dport=6081)` has hardware classification then the flent tree compiled for the L2 ring never needs to _attempt_ to classify thsoe packets.
+* Allows us to strip out all bandwidth checks if we know _a priori_ that no reachable child flow entry has any such limits.
+* Removes minor contention around flow entry refholds. The below pseudocode uses refholds as we do today for flow_entries, but it is still better to keep each bound to a single CPU.
+* Gives us the opportunity to allocate flent-nodes in a single block to increase cache locality (and simplify depth-first traversal at execution time).
+* It may prove more valuable to define a `compiled_flent_t` which contains only the necessary fields for packet processing. This document is currently written using the standard `flow_entry_t` structs for clarity.
+
+Broadly, we want to follow the same strategy as today when adding a new client, u'cast, or b'cast to a device:
 
 . Acquire the MAC perimeter.
 . Quiesce all traffic on the device.
 . Acquire write lock on the flent tree.
-. For the duration of any modification to an SRS (action recompute, update BW ctl lists), acquire the lock on that SRS.
+. *For each entry SRS, construct a local view of the flent tree.*
+. For the duration of any modification to an SRS (action recompute, update BW ctl lists, assign a local flent tree), acquire the lock on that SRS.
 
-This is necessary because the addition/removal of flents, SRSs, and softrings will require that we regenerate `srs_bw` lists, and inform clients about resource addition/removal.
-
+This is necessary because the addition/removal of flents, SRSs, and softrings will require that we regenerate `srs_bw` lists and local flent trees, and that we inform clients about resource addition/removal.
 Each change to the flent tree requires that we recompute, for each affected SRS, its list of `bw_ctl` handles and any delegated actions--including quiescing, removing, and adding resource handles for client flows.
 
 === Packet processing pseudocode
@@ -937,26 +959,54 @@ In general, assume that the main interactions between the interrupt context, pol
 
 == Considerations in the Tx pathway
 
-XXX TODO
+Currently, the L2 classification of outbound packets is known by the MAC client they are sent over, during `mac_tx`.
+`flowadm`/subflows currently interact with the transmit pathway at the start of this function:
 
-* We aren't yet considering exactly what this entails on the Tx path, and how this feeds into bandwidth counting/limitation there. We probably don't always need e.g. a dedicated Tx ring for a subflow, even if we have one on Rx.
+. if any user flows are set, then the first packet is classified and the matched flow's Tx SRS is selected.
+. on a flow miss or an empty subflow table, the client's shared Tx SRS is selected.
 
-== Project Plan
+The packet chain is then sent either passed directly to the Tx ring (https://github.com/illumos/illumos-gate/blob/b208366a8d213438f976f410282f05cd0ab98057/usr/src/uts/common/io/mac/mac_sched.c#L672-L674['the simple case']), or enters a config-dependent Tx function (e.g., BW controlled, `aggr`, fanout across Tx rings).
+All packets sent are thus assumed to belong to the same user flow.
+`ip` currently upholds this contract by sending one packet at a time.
+Relaxing this assumption may allow for full packet chains to be safely passed through from devices such as `viona`.
 
-The first goal, even if we don't have the means to plumb non-L2 hardware rings in, is that we should be in a place where we no longer spin up the proto classification rings during datapath setup.
-`DLD_capab_poll`/`DLD_capab_direct` should be the first true user of this API.
+I propose that the Tx pathway should walk a similar classification tree such that packets will arrive at the correct SRS, bandwidth checks, and so on.
+A key part of this, mentioned earlier, is that not all flows should be considered at this stage.
+I.e., when the only client-specified flows a link has are DLS bypass flows, these do not require statistics or bandwith limiting.
+Each client will have a prebuilt tree view for this purpose, excluding such nodes, and `mac_tx` should not attempt to classify any packets if there are no such flows registered (i.e., equivalent to today's 'no subflows' case where `mcip->mci_flent->tx_srs` is chosen).
 
-XXX: double check
+This IPD does not propose changing the core logic of the general Tx pathway.
+A non-zero `fanout_hint` *could* still be used to imply that a packet chain belongs to a single flow -- internally, the Tx fanout modes will emit all packets on the same ring if this is set, rather than using the flow hash to split the chain.
+Tx rings themselves will still be used as they are today.
+However, `mac_tx_bw_mode` will need to be modified to account for nested bandwidth controls.
 
-. Rework datapath, but keep `mac_datapath_setup` as the primary install point of DLS bypass on proto-fanout flows etc.
-  * Special-case user flows to apply between l2 and OTH.
-. Remove proto-fanout flows from datapath setup, and have DLS construct them itself using the new API.
-. Push user-flow management up to DLS.
-. Expose an API on DLS to others to emplace their flows onto it (i.e., XDE).
+=== Future possibilities
+
+* Most treatment of rings in this document has focussed on dedicating receive rings to individual hardware-accelerated traffic classes as follow-on work. We may in future desire that flows could have dedicated Tx rings as well, which may require some care around the use of `MFA_FLAGS_RX_ONLY`.
+* It may be useful for a client to send traffic on a received flow entry handle. This would be equivalent to `mac_tx`, with the promise that any sent packets belong exactly to a given class (and thus could skip some degree of classification), but would also make it easier for other modules to directly send packets onto e.g. dedicated Tx resources.
+
+== Initial Project Plan
+
+The main goal of this project is that we should no longer spin up the protocol classification rings during datapath setup.
+`DLD_capab_poll`/`DLD_capab_direct` should be the first true user of this API, and ideally we would allow modules to request custom flow actions via `dls` shortly after.
+
+The scope of these changes implies some amount of upheaval.
+Some draft milestones and/or individual patches en route to these goals could be:
+
+. Build and maintain (but not use) compiled flow entry trees using L2 and `flowadm` flows, in parallel with the current datapath.
+. Rework the core of the Rx datapath, using flow entry trees in place of the flow and subflow tables.
+  * Temporarily special-case DLS bypass to apply on the L2 flow entry.
+  * Keep TCP/UDP/OTH softring distinction in place.
+. Install TCPv4 and UDPv4 DLS bypass as flow entries, and remove TCP/UDP softrings from SRS.
+  * Keep `mac_datapath_setup` as the primary install point of DLS bypass on proto-fanout flows etc.
+. Remove DLS bypass flow install from datapath setup, and have DLS construct them itself using the new API.
+. Push user-flow management and lifecycle from MAC up to DLS.
+. Expose an API on DLS to others to place their flows onto it (i.e., software routers).
+
+Dedicating hardware resources for arbitrary traffic classes will require design and implementation work on the MAC provider APIs, and so we will not initially be able to exercise H/W classification cut-in past L2.
 
 == Open Questions
 
-* Today, fanout relies on each SRS having *its own* set of stem:[m] softrings per bypass class. As written, this proposal does not yet answer how to ensure that each ring has dedicated softrings, which we desire to limit contention. How should we map from n rings with m-way fanout to e.g. n*m softrings in this scheme?
 * The work that would go into enabling `flowadm` and related tools to allow flow class mixing is likely out of scope at first.
 * How much 'organisation' of flent trees should be handled by MAC or delegated to the client? Is it the responsibility of `dls`/`ip` to ensure that a subflow path is semantically valid? I.e., who decides that placing `(UDP, port=x)` as a child of `(TCP)` is illegal?
 * How do we implement classification functions that are appropriately progressive on an on/off basis? E.g., we want classification of `(UDP, dport=x)` to only check `dport` if it is a child of `(UDP)`.

@@ -2,7 +2,7 @@
 :toc: left
 :numbered:
 :icons: font
-:state: predraft
+:state: draft
 :revremark: State: {state}
 :authors: Kyle Simpson <kyle@oxide.computer>
 :sponsor:
@@ -34,7 +34,7 @@ Clients (i.e., `dls`) will create and manage all flows above the unicast client 
 
 This will enable a few new capabilities:
 
-. Rings will be able to represent a wider range of 'hardware classified' scenarios. Today, Rx rings exclusively represent L2/DMAC classification. Modern NICs allow for one-to-one & many-to-many traffic classes to target Rx Queues/rings on richer criteria.footnote:[We're not yet considering a MAC provider interface for requesting such rings, or a flow-level API for specifying which levle of hardware classification is needed.]
+. Rings will be able to represent a wider range of 'hardware classified' scenarios. In illumos today, Rx rings exclusively represent L2/DMAC classification. Modern NICs allow for one-to-one & many-to-many traffic classes to target Rx Queues/rings on richer criteria.footnote:[We're not yet considering a MAC provider interface for requesting such rings, or a flow-level API for specifying which levle of hardware classification is needed.]footnote:[Tx rings could also be dedicated to certain flows, but this is beyond the immediate scope of this IPD.]
 . The datapath will be able to better support mixed hardware/software classification. A destination {ring, softring set, flow entry} can represent what work is already done, and a flow tree informs the datapath as to what classification work remains to be handled in software.
 . Flows created by tools such as `flowadm` can be better integrated with performance enhancements such as fanout, ring poll threads, squeue polling, and DLS bypass.
 . Nested bandwidth limits between `flowadm` flows and links may now be simultaneously enforced.
@@ -59,7 +59,7 @@ The first layer exclusively handles L2 semantics via a "flow table" construction
 This layer is skipped if the ring a packet arrives on is "hardware classified", a label which is stored in an `enum` value on the ring itself.
 Hardware classification is available when no clients/links are forced to share rings or groups.footnote:[An exclusive link will have several rings/groups by default. The 'default' group will hardware-classify broadcast/unicast packets, and one or more rings will be allocated for matches on the unicast MAC address.]
 
-The second layer contains L3/L4 flows when configured by a user using the `flowadm` tool, which are today intended for specifying bandwidth limits and prioritisation of traffic classes. This layer is dynamically enabled/disabled on a per-client basis by changing the upcall function pointer attached to the ring/softring set.
+The second layer contains L3/L4 flows when configured by a user using the `flowadm` tool (occasionally termed 'subflows'), which are today intended for specifying bandwidth limits and prioritisation of traffic classes. This layer is dynamically enabled/disabled on a per-client basis by changing the upcall function pointer attached to the ring/softring set.
 
 In the interrupt context, this looks like:
 
@@ -146,11 +146,11 @@ Generally, any layer (including the interrupt context) is free to process packet
 
 === DLS bypass and SQueue polling setup[[squeue-setup]]
 
-Partial stack bypass--i.e., allowing packets to shortcut past `dls` and into `ip`--is a necessary part of ensuring higher network throughput in illumos today.
-Although we will want to define 'an action' for each flow entry (which suits DLS bypass for UDP), TCP SQueue polling is sensitive to the presence, arrival, departure, and CPU binding of each ring associated with a flow entry/SRS.
+Partial stack bypass -- i.e., allowing packets to shortcut past `dls` and into `ip` -- is a necessary part of ensuring higher network throughput in illumos today.
+To enable DLS bypass for UDP, it is sufficient to be able to define an action/callback for each flow entry.
+In contrast TCP SQueue polling is sensitive to the presence, arrival, departure, and CPU binding of each ring associated with a flow entry/SRS.
 
 A key part of how SQueue polling works today is an override of some dedicated function handlers on the MAC client, which are a family of ring event notifications (`mcip->mci_resource_*`).footnote:[The prominence and naming of the resource APIs would imply that they are used for *all* rings rather than just TCP proto-rings.]
-Both performance enhancements then set the direct receive function set on each applicable softring (`softring->s_ring_rx_func = mcip->mci_direct_rx_fn` => `ip_input`).
 Today, these are:
 
 .mac.h
@@ -192,6 +192,8 @@ struct mac_client_impl_s {      /* Protected by */
   /* ...existing... */
 }
 ----
+
+Both flavours of DLS bypass then set the direct receive function on each applicable softring (`softring->s_ring_rx_func = mcip->mci_direct_rx_fn` => `ip_input`).
 
 At a high level, this datapath is set up by:
 
@@ -381,7 +383,7 @@ This is described <<arch-diff,in more detail>> as part of the implementation sec
 === Subflow Action Delegation[[subflow_deleg]]
 
 In the case that we want to use subflows to track statistics or impose bandwidth limits, we do not want to lose the performance benefits of DLS bypass.
-A tree node having a `NUL` action should use the action of its first valid ancestor flow entry, after/as they are included in flowstats and bandwidth limits.
+A tree node having a `NUL` action should use the action of its first valid ancestor flow entry, after they are included in stats and bandwidth limits of the matched flow.
 Logically we are walking up the tree--in practice, we can treat such a flow's softrings as though they belong to that ancestor and set `s_ring_rx_func` accordingly.
 
 === Bandwidth Limiting
@@ -401,8 +403,8 @@ We discuss here a mixture of simplifications for an initial implementation, API 
 
 === Simplifying assumptions
 * Nodes of a flent tree should be *ordered* following the OSI layers.
-  - We do not require a tree node per protocol layer, only to constrain valid parent-child relationships for initial implementation.
-  - E.g. `(ROOT)->(DMAC=00:aa:bb:...)->(UDP_DPORT=80)` is a valid flow hierarchy even though IP is excluded, but `(ROOT)->(DEST_IP=80)->(DMAC=00:aa:bb:...)` is invalid. This may need to be relaxed in future depending on the hardware classification capability of various NICs.
+  - We do not require a tree node per protocol layer, only to constrain valid parent-child relationships for the initial implementation.
+  - E.g. `(ROOT)->(DMAC=00:aa:bb:...)->(UDP_DPORT=80)` is a valid flow hierarchy even though IP is excluded, but `(ROOT)->(DEST_IP=10.0.0.1)->(DMAC=00:aa:bb:...)` is invalid. This may need to be relaxed in future depending on the hardware classification capability of various NICs.
   - However, a ring may *start* having matched one or more layers (e.g., L2 + UDP).
   - Encapsulation, if eventually needed, can be treated as a higher set of layers.
   - This does not prevent (user-)flows from cutting into an existing tree, or placing further limits on an existing flow. E.g., a client should be able to insert a flow limiting traffic to/from a remote IP into an existing tree having (L2 MAC) -> (L4 UDP, L4 TCP). Equally, a flowadm flow should be able to specify a bandwidth limit on UDP/TCP in concert with an existing flent used for DLS bypass.
@@ -421,11 +423,11 @@ Softrings bound to TCP require the full gamut of these APIs (see `dld_capab_poll
 For now we will not remove the resource management functions from `mac_impl_t`, but will replace them with fixed functions which find and use the `flow_action_t` relevant to a ring.
 We have three cases to consider then between 'Action' and 'Delegate':
 
-. Flows created with no explicit action, which will instead deliver packets using an ancestor flent's action.footnote:[This is always safe in principle given that the tree will always have `freemsgchain` as a root action.]
-. Flows which practically require only a function pointer and client resource (e.g. UDP, XDE),
-. Flows which need to set and act upon per-ring resources/cookies (e.g. TCP).
+. Flows created with no explicit action, which will instead deliver packets using an ancestor flent's action.footnote:[This is always safe in principle given that the tree will always have `freemsgchain`/Drop as a root action.]
+. Flows which practically require only a function pointer and client resource (e.g. UDP DLS bypass),
+. Flows which, in addition, need to set and act upon per-ring resources/cookies (e.g. TCP DLS bypass).
 
-We can achieve this and drop using an action format like the below:
+We can achieve this and drop using an action format like below:
 
 .mac_flow.h
 [source,c]
@@ -462,12 +464,12 @@ typedef struct flow_action_s {
    * a client about softring creation/deletion, CPU bindings and to
    * enable/disable/perform softring polling.
    */
-  mac_resource_add_t  fa_resource_add; /* SL */
-  mac_resource_remove_t fa_resource_remove;  /* SL */
-  mac_resource_quiesce_t  fa_resource_quiesce; /* SL */
-  mac_resource_restart_t  fa_resource_restart; /* SL */
-  mac_resource_bind_t fa_resource_bind;  /* SL */
-  void      *fa_resource_arg;  /* SL */
+  mac_resource_add_t  fa_resource_add;
+  mac_resource_remove_t fa_resource_remove; 
+  mac_resource_quiesce_t  fa_resource_quiesce;
+  mac_resource_restart_t  fa_resource_restart;
+  mac_resource_bind_t fa_resource_bind; 
+  void      *fa_resource_arg; 
 } flow_action_t;
 
 /*
@@ -476,11 +478,13 @@ typedef struct flow_action_s {
  */
 typedef flow_entry_handle_t void*;
 
-/* Removed */
+/* Removed -- user flows still served by dld_add_flow etc. */
 /* ---
 int
 mac_link_flow_add(datalink_id_t linkid, char *flow_name,
     flow_desc_t *flow_desc, mac_resource_props_t *mrp);
+int mac_link_flow_remove(char *);
+int mac_link_flow_modify(char *, mac_resource_props_t *);
 --- */
 
 /* --- NEW --- */
@@ -507,7 +511,7 @@ extern uint32_t mac_flow_modify_props(flow_entry_handle_t, mac_resource_props_t 
 ==== 'User/flowadm flows' as a DLS-level concept
 
 Note that we no longer need to store or concern ourselves about the difference between a 'user' (`flowadm`) and a 'client' (`mch`) action.
-DLS as a client should now be responsible for tracking the flows it creates which fall into the 'user' bucket, just as it will now be responsible for creating the DLS bypass as another set of flows on top of the unicast flows managed by MAC itself.
+DLS as a client should now be responsible for tracking the flows it creates which fall into the 'user' bucket, just as it will now be responsible for creating the DLS bypass a set of client flows on top of the unicast flows managed by MAC itself.
 
 .mac_flow_impl.h
 [source,c]
@@ -540,7 +544,7 @@ MAC resource properties (fanout, CPU assignments, bandwidth limits) already work
 We want to establish that:
 
 . A flow with an action which does not specify resource properties will have the *CPU-based properties* autocomputed, as occurs today.footnote:[I'm torn on whether this should inherit the effective properties of the parent instead.] We will not construct another bandwidth limit, even if we choose to inherit a parent's CPU bindings etc.
-. A flow with an action which does specify resource properties will autocompute them, as occurs in datapath setup today.
+. A flow with an action which does specify resource properties will make use of them, as occurs in datapath setup for full SRSes today.
 . Resource properties are discarded for any 'Drop' action.
 . Resource properties are upheld for any 'Delegate' action.
 
@@ -732,9 +736,9 @@ These are to be refreshed whenever the flow tree is altered (action changed, new
 Having separate prebuilt views of the flow tree provides additional benefits:
 
 * This lets flows which only care about custom receive processing (DLS bypass) have no effect on the Tx pathway.
-* We may elide checks against flows we know to be H/W classified elsewhere. E.g., if `(UDP,dport=6081)` has hardware classification then the flent tree compiled for the L2 ring never needs to _attempt_ to classify thsoe packets.
-* Allows us to strip out all bandwidth checks if we know _a priori_ that no reachable child flow entry has any such limits.
-* Removes minor contention around flow entry refholds. The below pseudocode uses refholds as we do today for flow_entries, but it is still better to keep each bound to a single CPU.
+* We may elide checks against flows we know to be H/W classified elsewhere. E.g., if `(UDP,dport=6081)` has hardware classification then the flent tree compiled for the L2 ring never needs to _attempt_ to classify those packets.
+* It allows us to strip out all bandwidth checks if we know _a priori_ that no reachable child/ancestor flow entry has any such limits.
+* Removes minor contention around flow entry refholds. The below pseudocode uses refholds as we do today for `flow_entry_t`s, but it is still better to keep each bound to a single CPU.
 * Gives us the opportunity to allocate flent-nodes in a single block to increase cache locality (and simplify depth-first traversal at execution time).
 * It may prove more valuable to define a `compiled_flent_t` which contains only the necessary fields for packet processing. This document is currently written using the standard `flow_entry_t` structs for clarity.
 
@@ -758,7 +762,8 @@ This leaves us with the following shared resources on each SRS:
 * Soft ring packet lists, used as a channel between (SRS worker) -> (Softring worker).
 
 We can hash out some of these interactions (and reiterate existing ones) in more detail via pseudocode.
-The vast majority of new detail is in `mac_rx_srs_drain` / `mac_rx_srs_drain_bw` -- several functions are described as a simplified version of their operation today to give a holistic view.
+The vast majority of new detail is in `mac_rx_srs_drain` / `mac_rx_srs_drain_bw` -- several functions are described as a simplified version of their operation today to give a holistic view of the packet processing datapath.
+This pseudocode also works on a standard flent tree, rather than a precompiled variant that we would prefer in practice.
 
 [source,python]
 ----
@@ -774,7 +779,7 @@ def mac_soft_ring_poll(ring):
     lock(ring->srs->srs_lock)
     append(
       pkts,
-      [ring->srs->srs_unclass_first, ring->srs->srs_unclass_last]
+      [ring->srs->srs_first, ring->srs->srs_last]
     )
     unlock(ring->srs->srs_lock)
 
@@ -785,7 +790,7 @@ def mac_srs_worker(srs):
   while True:
     lock(ring->srs->srs_lock)
     # either mac_rx_srs_drain or mac_rx_srs_drain_bw
-    if (srs->srs_unclass_first != NULL or srs->srs_class_first != NULL):
+    if (srs->srs_first != NULL or srs->srs_class_first != NULL):
       srs->srs_drain_func(srs, SRS_WORKER)
     else:
       await(srs->sr_async)
@@ -818,7 +823,7 @@ def mac_rx_srs_process(_unused, srs, pkts, is_loopback):
   lock(srs->srs_lock)
   append(
     pkts,
-    [srs->srs_unclass_first, srs->srs_unclass_last]
+    [srs->srs_first, srs->srs_last]
   )
   if (SRS_PROC ∉ srs->state and not loopback and not stack_too_deep):
     # either mac_rx_srs_drain or mac_rx_srs_drain_bw
@@ -875,7 +880,7 @@ def mac_rx_srs_drain(srs, proc_type):
         unlock(curr_flent->bw_ctl)
         to_refund[..depth] += (len(denied_pkts), msglen(denied_pkts))
 
-    if ascended || curr_flent->fe_child == NULL:
+    if ascended or curr_flent->fe_child == NULL:
       # passed all relevant packets onto our subtree,
       # or there is no subtree
 
@@ -897,7 +902,7 @@ def mac_rx_srs_drain(srs, proc_type):
         curr_flent->fe_cb_arg1, arg2, owned_packets[depth], False
       )
 
-      if curr_flent->fe_sibling != NULL:
+      if depth > 0 and curr_flent->fe_sibling != NULL:
         # move to sibling if possible
         refhold(curr_flent->fe_sibling)
         refrele(held_flents[depth])
@@ -976,7 +981,7 @@ I.e., when the only client-specified flows a link has are DLS bypass flows, thes
 Each client will have a prebuilt tree view for this purpose, excluding such nodes, and `mac_tx` should not attempt to classify any packets if there are no such flows registered (i.e., equivalent to today's 'no subflows' case where `mcip->mci_flent->tx_srs` is chosen).
 
 This IPD does not propose changing the core logic of the general Tx pathway.
-A non-zero `fanout_hint` *could* still be used to imply that a packet chain belongs to a single flow -- internally, the Tx fanout modes will emit all packets on the same ring if this is set, rather than using the flow hash to split the chain.
+A non-zero `fanout_hint` *could* still be used to imply that a packet chain belongs to a single flow -- internally, the Tx fanout modes will emit all packets on the same ring if this is set, rather than using each packet's flow hash to split the chain.
 Tx rings themselves will still be used as they are today.
 However, `mac_tx_bw_mode` will need to be modified to account for nested bandwidth controls.
 
@@ -1001,7 +1006,7 @@ Some draft milestones and/or individual patches en route to these goals could be
   * Keep `mac_datapath_setup` as the primary install point of DLS bypass on proto-fanout flows etc.
 . Remove DLS bypass flow install from datapath setup, and have DLS construct them itself using the new API.
 . Push user-flow management and lifecycle from MAC up to DLS.
-. Expose an API on DLS to others to place their flows onto it (i.e., software routers).
+. Expose an API on DLS for other modules to place their flows onto it (i.e., software routers).
 
 Dedicating hardware resources for arbitrary traffic classes will require design and implementation work on the MAC provider APIs, and so we will not initially be able to exercise H/W classification cut-in past L2.
 
@@ -1013,6 +1018,7 @@ Dedicating hardware resources for arbitrary traffic classes will require design 
 * This design assumes 'classification' from a root SRS should probably be left to the worker thread, while poll thread logic should hopefully not change much. Is this a good assumption?
 * How do we reconcile a possible H/W classifier rule which is simply 'UDP' (lacking a specified IP version) with existing `(v4->udp)` and `(v6->udp)` flow chains?
 * Fanout (hash function) to softrings is based on two functions today -- proto fanout vs src-ip fanout. Do these always make sense, should we be able to replace them on a per-flent basis as part of `flow_action_t`?
+** For instance, Geneve-tunnelled packets will have a fixed UDP destination port, meaning we might prefer that mac performs fanou using the source port (already derived from the 5-tuple hash), and/or the virtual network identifier (VNI)
 * The pseudocode maintains the single-client exception to prevent software classification -- how common is this today?
 
 [bibliography]

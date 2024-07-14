@@ -1,16 +1,20 @@
 :tabsize: 8
 :toc: left
 :toclevels: 5
+:state: published
+:revremark: State: {state}
+:authors: Ryan Zezeski <ryan@zinascii.com>
+:sponsor: Robert Mustacchi <rm@fingolfin.org>
 
 = IPD 20 Kernel Test Facility
+{authors}
 
+[cols="3"]
 |===
-|Authors |State
-
-|Ryan Zezeski <ryan@zinascii.com>
-|draft
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
 |===
-
 
 == Goal
 

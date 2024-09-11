@@ -57,6 +57,7 @@ information is available at the end of this document.
 | published | [IPD 43 NVMe 2.0, libnvme, and the nvme(4D) ioctl interface](./ipd/0043/README.adoc)
 | predraft | [IPD 44 Distribution as a first class concept](./ipd/0044/README.adoc)
 | draft | [IPD 45 Flow trees in the MAC datapath](./ipd/0045/README.adoc)
+| predraft | [IPD 46 IP Tunnel and IPsec ergonomics](./ipd/0046/README.adoc)
 
 
 ## Contributing

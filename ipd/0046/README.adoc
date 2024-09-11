@@ -1,0 +1,374 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Joshua M. Clulow <josh@sysmgr.org>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 46 IP Tunnel and IPsec ergonomics
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+Today, illumos supports several kinds of IP-over-IP tunnel.  Tunnels can be
+used to connect two disjoint hosts or networks by encapsulating the traffic
+between those systems in IP traffic that can be safely, without conflict of
+addressing or configuration, forwarded over a different transport network like
+the Internet.  In addition, illumos supports the use of IPsec for both
+authentication and confidentiality of the traffic sent through those tunnels.
+
+The base technology in the networking stack is available today, and able to
+be directed by the operator of an illumos system, to create a variety of
+VPN and other tunnel topologies.  To some extent, it is also possible to
+orchestrate automatic control of tunnel configuration and security, but there
+are some ergonomic and safety challenges that we should address to make this
+easier; for both operators and for automation!
+
+== Current State
+
+Today, the preferred way to create an IP-in-IP tunnel between two systems is
+using a combination of https://illumos.org/man/8/dladm[dladm(8)] to establish a
+named virtual interface and the source and destination addresses, and then
+https://illumos.org/man/8/ipadm[ipadm(8)] to establish the IP addressing
+details for the traffic that flows through the tunnel.  For example, an
+IP-in-IP tunnel for IPv4 traffic between the local host and a remote peer:
+
+----
+# dladm create-iptun -T ipv4 -a local=10.1.1.1,remote=134.148.1.1 mytun0
+# dladm show-iptun
+LINK            TYPE  FLAGS  LOCAL               REMOTE
+mytun0          ipv4  --     10.1.1.1            134.148.1.1
+----
+
+To then set up IP addresses for the traffic that flows through the tunnel:
+
+----
+# ipadm create-addr -T static -a local=100.64.20.1,remote=100.64.10.1 mytun0/v4
+# ipadm show-addr mytun0/
+ADDROBJ           TYPE     STATE        ADDR
+mytun0/v4         static   ok           100.64.20.1->100.64.10.1
+----
+
+The remote peer would do all of the same configuration, but reverse the _local_
+and _remote_ addresses.
+
+The tunnel configuration we've created above causes the operating system to
+wrap up any traffic destined for **100.64.10.1** in an outer IP packet, as per
+https://datatracker.ietf.org/doc/html/rfc1853[RFC 1853], and send it
+(unencrypted) over the network to remote peer **134.148.1.1**.  That remote
+peer should then unwrap it and deliver it to its analogous tunnel interface.
+
+There are two kinds of security improvement we can immediately make to this
+configuration: **authentication** of the traffic, so that we can be sure our
+remote peer knows that we sent it; and **encryption** of the traffic, so that
+we can be sure nobody but the remote peer knows what we sent.  Both of these
+can be achieved with IPsec policy!
+
+To enable a basic IPsec policy for both authentication and encryption, today we
+would create the `/etc/inet/ipsecinit.conf` file and then enable or refresh the
+`svc:/network/ipsec/policy` service, which uses the
+https://illumos.org/man/8/ipsecconf[ipsecconf(8)] language and tool to apply it
+to the system.  An example file for the tunnel described above:
+
+----
+# cat /etc/inet/ipsecinit.conf
+{
+    tunnel mytun0
+    negotiate tunnel
+} ipsec {
+    encr_algs aes-gcm
+    encr_auth_algs hmac-sha256
+}
+----
+
+This policy mandates that encapsulated tunnel traffic must be encrypted with
+**AES GCM** encryption, and must be signed and authenticated with a
+**HMAC-SHA256** code that that remote peer can verify.  When this policy
+is correctly loaded by the system, the **s** flag is visible on the
+tunnel:
+
+----
+# dladm show-iptun
+LINK            TYPE  FLAGS  LOCAL               REMOTE
+mytun0          ipv4  s-     10.1.1.1            134.148.1.1
+----
+
+This means that traffic will be dropped unless it can be correctly encrypted.
+Whether you create the tunnel first and then apply the policy, or apply the
+policy first and then create the tunnel, the system generally does the right
+thing.
+
+Once a policy is in place, finer details such as keying material and replay
+windows and key expiry policies are specified more dynamically as _Security
+Associations (SAs)_.  These may be manually created associations provided by
+the operator through the https://illumos.org/man/8/ipseckey(8)[ipseckey(8)]
+tool on the live system, or at boot via the `svc:/network/ipsec/manual-key`
+service which uses that tool to add SA entries from the
+`/etc/inet/secret/ipseckeys` file.  More usefully, though, some key management
+service like https://illumos.org/man/8/in.iked[in.iked(8)] will provide dynamic
+negotiation of keys with a remote system.  Unbundled software can also provide
+robust management of SA entries via the Committed
+https://illumos.org/man/4P/pf_key[pf_key(4P)] socket interface, allowing for a
+lot of flexibility in how tunnels are secured over complex or even hostile
+networks.
+
+== Challenges
+
+=== Tunnel security policies fail open
+
+Today, policy and the base configuration of a tunnel are performed in two
+separate tools: 
+
+- https://illumos.org/man/8/dladm[dladm(8)] for tunnel configuration
+- https://illumos.org/man/8/ipsecconf[ipsecconf(8)] for IPsec policy
+
+The tunnel will pass traffic whether or not there is an IPsec policy in place.
+If the tunnel is created first, and the IPsec policy is created second, there
+is a period of time where unencrypted IP-in-IP traffic may be sent
+unintentionally by the host.  If the `svc:/network/ipsec/policy` service is
+disabled, either intentionally or by mistake, the stop action for that service
+will use `ipsecconf -F` to flush _all policies_ from the system so that it has
+a clean slate against which to apply them again if re-enabled.
+
+This interface and these precise mechanics definitely make it easy to
+accidentally turn a tunnel that is secure into one which is insecure, but may
+still end up working enough that you don't notice!  The only visible indicator
+would be the lack of the **s** flag in the `dladm show-iptun` output.
+
+=== IPsec policy configuration is monolithic
+
+The `svc:/network/ipsec/policy` service takes complete control over the policy
+for the entire system, including all tunnels.  When disabled or restarted, it
+clears the slate with `ipsecconf -F` prior to then establishing the current
+intended configuration from the single configuration file, if one is present.
+
+This model, while simple and easy to understand, means that any operator or
+automatic tool that needs to make layered or surgical additions to the policy
+needs to parse the whole file and understand the whole file in order to be able
+to modify it.  It's not easy (or perhaps even strictly completely possible) to
+deliver a portion of the policy configuration in a way that would be protected
+from other concurrent reconfigurations on the same system.
+
+=== IPsec policy has no Committed programmable interface
+
+The policy file language is Committed, and relatively easy for people to read
+and write.  It's likely also relatively easy to _generate_, as required, in
+automated tools.  To learn about the current state of the system, though,
+requires that tools contain their own parser for that language so that the
+output of, say, `ipsecconf -L`; e.g.,
+
+----
+# ipsecconf -L
+#INDEX mytun0,9
+{ tunnel mytun0 negotiate tunnel dir out } ipsec { encr_algs aes-gcm(128..256) encr_auth_algs hmac-sha256(256) sa shared }
+#INDEX mytun0,10
+{ tunnel mytun0 negotiate tunnel dir out } ipsec { encr_algs aes-gcm(128..256) encr_auth_algs hmac-sha256(256) sa shared }
+#INDEX mytun0,11
+{ tunnel mytun0 negotiate tunnel dir in } ipsec { encr_algs aes-gcm(128..256) encr_auth_algs hmac-sha256(256) sa shared }
+#INDEX mytun0,12
+{ tunnel mytun0 negotiate tunnel dir in } ipsec { encr_algs aes-gcm(128..256) encr_auth_algs hmac-sha256(256) sa shared }
+----
+
+This stands quite apart from the https://illumos.org/man/4P/pf_key[pf_key(4P)]
+interface that allows robust examination and manipulation of the current state
+of the security assocations on the system.
+
+=== Tunnels and related IPsec policy have completely separate lifecycles
+
+Because of the disjoint tools for managing IP tunnels and the IPsec policy that
+applies to those tunnels, it's relatively easy to end up in a situation where
+you have created or removed only, but not both, pieces of related
+configuration.  This is somewhat analogous to the classic split between disk
+and file system configuration, and subsequent sharing of those file systems via
+NFS, in the era before ZFS.
+
+While it's still possible to perform manual and separate configuration of file
+systems and sharing with ZFS, the preferred path is generally to use the
+integrated support for sharing those file systems.  The **sharenfs** dataset
+property, as described in https://illumos.org/man/8/zfs[zfs(8)], allows the
+operator to attach https://illumos.org/man/8/share[share(8)] and
+https://illumos.org/man/8/share_nfs[share_nfs(8)] options directly to the
+dataset itself.  A ZFS dataset can be created and shared via NFS in a single
+operation, and deleting that dataset later will remove the sharing
+configuration at the same time as the data.
+
+== Proposed Improvements
+
+There are a lot of things we could do to improve the ergonomics and safety of
+the fundamentally sound underlying technology, here.  The following
+improvements are proposed in their suggested order of completion.
+
+=== New options at tunnel creation to make IPsec policy mandatory for a tunnel
+
+In order to improve our robustness against a security-sensitive
+misconfiguration, we should add new flags to `dladm create-iptun` that force a
+tunnel to require an attached IPsec policy to function.  For example, we might
+use the `-S` option to mean _IPsec security is required_, and the **S** flag
+(in **FLAGS**) to represent that posture:
+
+....
+# dladm create-iptun -T ipv4 -S -a local=10.1.1.1,remote=134.148.1.1 sectun0
+# dladm show-iptun
+LINK            TYPE  FLAGS  LOCAL               REMOTE
+mytun0          ipv4  s--    10.1.1.1            134.148.1.1
+sectun0         ipv4  --S    10.1.1.1            157.85.1.1
+....
+
+From a forwarding perspective, a secured tunnel that has no policy would drop
+all traffic as if it had a policy but without any valid security associations.
+Such a tunnel would be presented to the operator as being offline whenever it
+does not have at least one attached IPsec policy:
+
+....
+# dladm show-link
+LINK        CLASS     MTU    STATE    BRIDGE     OVER
+mytun0      iptun     1402   up       --         --
+sectun0     iptun     1402   down     --         --
+
+# ipadm show-addr
+ADDROBJ           TYPE     STATE        ADDR
+lo0/v4            static   ok           127.0.0.1/8
+mytun0/v4         static   ok           100.64.20.1->100.64.10.1
+broken0/v4        static   inaccessible 100.64.30.1->100.64.40.1
+....
+
+When a policy is added, it would come online, unless that policy is again
+removed.
+
+....
+# dladm show-iptun
+LINK            TYPE  FLAGS  LOCAL               REMOTE
+mytun0          ipv4  s--    10.1.1.1            134.148.1.1
+sectun0         ipv4  s-S    10.1.1.1            157.85.1.1
+
+# dladm show-link
+LINK        CLASS     MTU    STATE    BRIDGE     OVER
+mytun0      iptun     1402   up       --         --
+sectun0     iptun     1402   up       --         --
+
+# ipadm show-addr
+ADDROBJ           TYPE     STATE        ADDR
+lo0/v4            static   ok           127.0.0.1/8
+mytun0/v4         static   ok           100.64.20.1->100.64.10.1
+broken0/v4        static   ok           100.64.30.1->100.64.40.1
+....
+
+=== IPsec policy should be read from multiple files
+
+To allow for more robust operator-driven and automated management of complex
+and especially dynamic policy entries, we could begin by adding support to the
+`svc:/network/ipsec/policy` service for reading more than one configuration
+file.  One potential approach for a multiple file policy configuration is
+to add a directory structure of partial policy shards; e.g.,
+
+....
+# mkdir -p /etc/inet/ipsecinit.d
+
+# cat >/etc/inet/ipsecinit.d/00_allow_cleartext_dns.conf <<EOF
+{ lport 53 } bypass {}
+{ rport 53 } bypass {}
+EOF
+
+# cat >/etc/inet/ipsecinit.d/50_tunnel_mytun0.conf <<EOF
+{
+    tunnel mytun0
+    negotiate tunnel
+} ipsec {
+    encr_algs aes-gcm
+    encr_auth_algs hmac-sha256
+}
+EOF
+
+# svcadm refresh svc:/network/ipsec/policy
+....
+
+This would be functionally equivalent to concatenating the configuration shards
+in lexicographical order of file name before passing the combined file to
+`ipsecconf -a ...`, or potentially invoking `ipsecconf -a` on each file in
+turn, as the results are cumulative anyway.
+
+Another option may be to provide special structural support for tunnel-specific
+policies; e.g.,
+
+....
+# mkdir -p /etc/inet/ipsecinit.d/tunnels
+
+# cat >/etc/inet/ipsecinit.d/tunnels/mytun0.conf <<EOF
+{
+    negotiate tunnel
+} ipsec {
+    encr_algs aes-gcm
+    encr_auth_algs hmac-sha256
+}
+EOF
+....
+
+In this model, the `tunnel mytun0` directive would be implicit in the the match
+pattern, derived from the file name of the file in the `tunnels` directory.
+This would allow the operator, or a tool, to create one global policy file that
+covers all tunnels, and then add or remove symbolic links to tunnel names as
+they are created and destroyed, applying a uniform policy to each.
+
+=== `PF_POLICY` should be documented as Committed
+
+The `PF_KEY` socket interface for enumerating and manipulating security
+assocations is flexible and sufficient for the construction of management
+software in C, or in other languages like Rust.  The
+https://illumos.org/man/8/ipsecconf[ipsecconf(8)] tool uses a similar socket
+interface to control the live state of _policy_: the currently undocumented
+`PF_POLICY` socket interface.
+
+The `net/pfpolicy.h` header already contains a good description of parts of
+this interface.  Like `PF_KEY`, all messages have a version prefix.  There
+would appear to be little downside to the relatively immediate stabilisation
+and public documentation of `PF_POLICY_V1`, with the knowledge that we could
+evolve it in the future as required.
+
+=== `PF_POLICY` and `PF_KEY` should have some kind of control namespaces
+
+To aid in dynamic control of both the IPsec policy _and_ the security
+association database, it would be very helpful to have a way for different
+competing management processes on the system to protect dynamic records they
+create from one another.  There is an extremely limited version of this concept
+present in the https://illumos.org/man/4P/pf_key[route(4P)] interface: the
+`RTF_PROTO1` and `RTF_PROTO2` flags can technically be used, through careful
+coordination, to allow two different routing daemons to manage a disjoint set
+of entries in the routing database; e.g., a BGP daemon might manage entries
+marked with `RTF_PROTO1` and leave entries marked with `RTF_PROTO2` for
+management by an OSPF daemon on the same system.
+
+In the IPsec and IP tunnel case, it is easy to imagine that one system might
+have several dynamic components competing to control subsets of the system
+policy and SA database; e.g., a set of dynamic IP tunnels for remote client
+systems as a VPN service, alongside a client service that manipulates IPsec
+policy and associations to allow controlled and secure access to an NFS file
+server.
+
+Two bits is probably not a wide enough identifier (for this, or for the
+forwarding database!).  We may wish to use a a wide integer, or some kind of
+string where one might reasonably stash an FMRI as in a process contract.
+
+The `svc:/network/ipsec/policy` service would be adjusted to restrict its
+global flushing operation to rules that were previously created without a more
+specific namespace tag.  The operator could turn it on or off, using the
+file-based configuration to manipulate global rules in the traditional way,
+without impacting the operation of more targetted dynamic configuration by
+other services on the same machine.

@@ -111,11 +111,11 @@ with the binary operators:
 
 [cols=2,options="header"]
 |===
-| Macro        | Type                                       |
-| `VERIFY3B()` | `boolean_t`                                |
-| `VERIFY3S()` | `int64_t` (i.e., signed integers)          |
-| `VERIFY3U()` | `uint64_t` (i.e., unsigned integers)       |
-| `VERIFY3P()` | `uintptr_t` (i.e., any pointer value)      |
+| Macro        | Type
+| `VERIFY3B()` | `boolean_t`
+| `VERIFY3S()` | `int64_t` (i.e., signed integers)
+| `VERIFY3U()` | `uint64_t` (i.e., unsigned integers)
+| `VERIFY3P()` | `uintptr_t` (i.e., any pointer value)
 |===
 
 These macros accept three arguments.  The first and third argument are

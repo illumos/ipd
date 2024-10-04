@@ -58,6 +58,7 @@ information is available at the end of this document.
 | predraft | [IPD 44 Distribution as a first class concept](./ipd/0044/README.adoc)
 | draft | [IPD 45 Flow trees in the MAC datapath](./ipd/0045/README.adoc)
 | predraft | [IPD 46 IP Tunnel and IPsec ergonomics](./ipd/0046/README.adoc)
+| predraft | [IPD 47 Trust, but VERIFY(): Assertions in the Kernel](./ipd/0047/README.adoc)
 
 
 ## Contributing

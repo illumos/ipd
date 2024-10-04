@@ -1,0 +1,314 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Joshua M. Clulow <josh@sysmgr.org>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 47 Trust, but VERIFY(): Assertions in the Kernel
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+The kernel programming environment provides a family of macros for compile- and
+run-time checking of invariants.  This document describes available facilities
+and when and where they are generally used in the kernel source.
+
+Unless otherwise noted, the macros described here are made available by
+including the `sys/debug.h` header in kernel code; e.g.,
+
+....
+#include <sys/debug.h>
+....
+
+=== Compile-time assertions
+
+The `CTASSERT()` macro can be used to confirm that an invariant holds when the
+software is being built.  The macro must be provided an expression that can be
+treated like a C boolean; i.e., `0` for **false** or any other integer value
+for **true**.  The expression must only use values that are well-defined
+constants that the compiler can fix at a specific value at compile time; e.g.,
+to confirm that a carefully packed structure has the expected size:
+
+....
+#define VDEV_PAD_SIZE           (8 << 10)
+
+typedef struct vdev_boot_envblock {
+        uint64_t        vbe_version;
+        char            vbe_bootenv[VDEV_PAD_SIZE - sizeof (uint64_t) -
+                        sizeof (zio_eck_t)];
+        zio_eck_t       vbe_zbt;
+} vdev_boot_envblock_t;
+
+CTASSERT(sizeof (vdev_boot_envblock_t) == VDEV_PAD_SIZE);
+....
+
+Both the size of the structure and the folded constant can be determined at
+compile time, so this is a good use of `CTASSERT()`.  Even though it looks like
+a function call style macro, it's acceptable to use it at the top level of a C
+source file, or even in a header.  As of
+https://www.illumos.org/issues/14454[bug 14454], this macro uses the C11
+`_Static_assert()` facility.
+
+=== Assertions in non-DEBUG (and DEBUG) software
+
+Most users of the system are running non-DEBUG builds of the OS software
+(sometimes called "release" builds, or "normal" builds).  DEBUG builds enable
+additional integrity checks and debugging facilities that can have a profound
+impact on memory usage and raw performance due to the overhead of additional
+book keeping.
+
+Even though the software is built to be used in a production setting, we try
+wherever possible to continue to confirm that our assumptions (invariants)
+hold.  The `VERIFY()` family of macros is intended for checking invariants in
+all builds (both non-DEBUG and DEBUG) and is never omitted via conditional
+compilation.  When a `VERIFY()` check fails the system panics immediately,
+optionally taking a crash dump or entering the debugger, and eventually
+rebooting.
+
+==== The base `VERIFY()` macro
+
+The base macro accepts a C expression that will be validated at run-time. The
+expression will be treated in the usual C boolean fashion: if `0`, the system
+will panic; any other value means the invariant held and execution continues.
+For example, it can be used for `NULL` checks:
+
+....
+VERIFY(t->t_ctx != NULL);
+....
+
+If `t->t_ctx` is `NULL`, the system will panic.  It can also be used to provide
+machine-checked documentation of which locks should be held (or not held!)
+upon entry to a function; e.g.,
+
+....
+VERIFY(MUTEX_HELD(&f->uf_mutex));
+VERIFY(MUTEX_NOT_HELD(f->uf_vfs_lockp));
+....
+
+==== The `VERIFY3*()` macro family
+
+In addition to the base macro, there are several macros for typed comparisons
+with the binary operators:
+
+[cols=2,options="header"]
+|===
+| Macro        | Type                                       |
+| `VERIFY3B()` | `boolean_t`                                |
+| `VERIFY3S()` | `int64_t` (i.e., signed integers)          |
+| `VERIFY3U()` | `uint64_t` (i.e., unsigned integers)       |
+| `VERIFY3P()` | `uintptr_t` (i.e., any pointer value)      |
+|===
+
+These macros accept three arguments.  The first and third argument are
+expressions that can be cast to the nominated type for comparison, and the
+second (middle) argument is a comparison operator.  For example, to ensure
+a `uint64_t` value can be safely stored in a `uint32_t`, you might perform
+a check like:
+
+....
+VERIFY3U(len, <=, UINT32_MAX);
+....
+
+These are also good for bounds checks when accessing an array.  These are best
+used with the less and greater than family of comparison operators (i.e., `<`,
+`<=`, `>`, and `>=`) and the equality operator (`==`).  In these cases the
+assertion will generate a panic message that includes the raw numeric value on
+both sides of the comparison, which is handy for debugging, and for seeing
+through various layers of variables and constants as are sometimes used to
+calculate threshold values.  In the case of the inequality operator, it's
+often best to just use the base `VERIFY()` macro; e.g.,
+
+....
+/*
+ * The three-argument form does not tell you anything in this case ...
+ */
+VERIFY3P(pointer, !=, NULL);
+
+/*
+ * ... that the simple form does not (i.e., the pointer is NULL):
+ */
+VERIFY(pointer != NULL);
+....
+
+==== The `VERIFY0()` macro
+
+The `VERIFY0()` macro is a special case that essentially inverts the logic of a
+regular assertion.  It is used for concise checking that a value _does_ equal
+zero, as it is often expected to on successful use of a function call.  This
+macro is essentially equivalent to `VERIFY3*(<expression>, ==, 0)`.
+
+Some routines are technically fallible under conditions; e.g., freeing a memory
+address or closing a file descriptor can only be done once and only with a
+value previously returned from an allocation or open routine. If we believe
+those conditions cannot occur because of the specific construction of the
+software, we should confirm our assumptions by wrapping the call in
+`VERIFY0()`; e.g.,
+
+....
+VERIFY0(zone_key_delete(vmm_zsd_key));
+....
+
+Note that in this example, it is critical to the program that the call occurs.
+If it is compiled out, the program would be incorrect.  This is only safe
+because the `VERIFY()` family is never omitted through conditional compilation,
+even in the most optimised non-DEBUG builds.
+
+=== Assertions in DEBUG software only
+
+The `ASSERT*()` family of macros is exactly the same as the `VERIFY*()` family,
+with one critical exception: they are omitted entirely from non-DEBUG builds of
+the software through conditional compilation.  The most important thing to note
+about this family of macros is that you _cannot_ use them to wrap expressions
+or function calls where the effect of that call is part of the correct
+operation of the program.  You must not use `ASSERT0()` in place of `VERIFY0()`
+to wrap a function that returns `0` on success; instead, you would need to save
+the return value in a variable and then use `ASSERT0()` for the (optional)
+check on the stored value.
+
+There are cases where we have invariants that we wish to document and check,
+but where the additional overhead of those checks inhibits the performance of
+the system to an unacceptable degree.  For example, if an interrupt handler is
+called many thousands of times a second in a critical data path, an `ASSERT()`
+might be more appropriate than a `VERIFY()` for that check.  Computers in this
+modern era are extremely fast, especially at simple integer comparisons for
+data that you were about to use anyway like a pointer or a reference count
+value.  It's generally appropriate to start out with `VERIFY()` where you can,
+and only switch to `ASSERT()` in cases where you're able to detect a
+performance difference through some measurement.  Remember: most people do not
+use DEBUG builds; we should check invariants in all builds where possible!
+
+==== The `IMPLY()` and `EQUIV()` macros
+
+You may also see occasional use of the `IMPLY()` and `EQUIV()` macros, which
+are also DEBUG-only like `ASSERT()`.  These exist primarily to enable the
+following sort of checks to appear concisely in DEBUG code:
+
+....
+/*
+ * IMPLY(first_condition, second_condition):
+ */
+if (first_condition) {
+        ASSERT(second_condition);
+}
+
+/*
+ * EQUIV(first_condition, second_condition):
+ */
+if (first_condition) {
+	ASSERT(second_condition);
+}
+if (second_condition) {
+	ASSERT(first_condition);
+}
+....
+
+These are actually implemented as short-circuiting expressions, so care must be
+taken to avoid putting any expression with expected side effects into
+especially the second argument of these macros.  In general, it's probably
+clearer to write out the condition being checked explicitly.  If you have a
+complex invariant you wish to verify only in DEBUG builds, you can also use
+`#ifdef DEBUG`.
+
+There is no `VERIFY()`-like version of these macros because they are not
+needed: it's easy to use `VERIFY()` under regular C control flow because it is
+never omitted through conditional compilation.
+
+=== Patterns to avoid
+
+==== Assertions are for invariants, not errors
+
+In general, we try to avoid having the system crash for anything that we could
+otherwise handle in a better way.  When we cannot allocate memory, we should
+return an error like `ENOMEM` or `EAGAIN`.  If there is no good way to return
+an error, we would prefer to sleep and wait for memory to become available
+while applying pressure on other subsystems to free up resources.  If a disk
+could not complete an I/O request, we should return `EIO` rather than crashing.
+
+None of the assertion routines described in this document are appropriate for
+checking error conditions that could reasonably occur.  On the other hand, if
+you believe that there is no way that a potentially fallible routine could fail
+for your chosen inputs, it's better to `VERIFY()` that fact than to cast the
+return value to `(void)` and ignore it.  In this case you are not handling and
+error, so much as declaring (and verifying!) an invariant: that the function
+should not fail in this context.
+
+Particular care should be taken with values passed into the kernel from a user
+mode program (privileged or unprivileged), or with values read from a disk, or
+with values received in network traffic.  These are all sources of _untrusted_
+input data.  You must not use assertions to validate untrusted inputs; use
+regular control flow and return values!  A good example of the wrong thing to
+do is accepting a buffer in an `ioctl()` call from a user process: you must
+return `EINVAL` to the user if the provided length of the buffer is too short,
+not use an assertion that would panic the system.
+
+==== Checks that are more strict for DEBUG than for non-DEBUG
+
+In general, and especially in older areas of the code, there are a lot of
+assertions that are only active for DEBUG builds; i.e., using the `ASSERT()`
+family of macros.  While it makes sense that there are some invariants that we
+can only _check_ on DEBUG builds, the set of invariants should not be dependent
+on the kind of build being done.  Invariant checks are about correctness; if it
+is correct to allow an error to be returned instead of panicking on non-DEBUG
+bits then that's also true for DEBUG bits.  For example, this code (an edited
+excerpt of some code from the gate) is stricter on DEBUG than on non-DEBUG:
+
+....
+static int
+xen_psm_addspl(int irqno, int ipl, int min_ipl, int max_ipl)
+{
+        if (irqno >= PIRQ_BASE && irqno < NR_PIRQS) {
+                ret = apic_addspl_common(irqno, ipl, min_ipl, max_ipl);
+        } else {
+                ret = ec_set_irq_priority(irqno, ipl);
+                ASSERT(ret == 0);
+
+                ec_enable_irq(irqno);
+        }
+
+        return (ret);
+}
+....
+
+Note that the return value from `ec_set_irq_priority()` is required to be zero,
+but only on DEBUG builds.  Otherwise, on non-DEBUG systems, the code continues
+to do other work and eventually just returns the non-zero error value.  If it
+is safe to drive past the problem and return an error, it is not an invariant
+and the use of assertions is not generally appropriate.
+
+When people run DEBUG systems, they are doing the community a great service by
+sacrificing some performance and resources in the name of better testing the
+software.  If running DEBUG software trivially panics in ways that non-DEBUG
+software does not, it can feel like the user is being punished for helping and
+less people will run DEBUG bits as a result.
+
+Fortunately, the DTrace
+https://illumos.org/books/dtrace/chp-fbt.html#chp-fbt[**fbt** provider] is
+available on both DEBUG and non-DEBUG systems, and is a powerful tool for
+checking for unexpected return codes without needing to modify the software. If
+the goal _is_ to panic the system, one can use a
+https://illumos.org/books/dtrace/chp-actsub.html#chp-actsub-4.2[kernel
+destructive action] like `panic()` in a D program to opt in to panicking on
+particular return codes while debugging.  It's also possible to use the
+https://illumos.org/books/mdb/chp-kmdb.html#chp-kmdb[kernel execution control]
+features of KMDB to set up conditional breakpoints of interest if you are in
+debugging one of the limited contexts of the system where DTrace is not
+available.

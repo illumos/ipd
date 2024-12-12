@@ -14,10 +14,10 @@ used for building, found on GitHub at http://github.com/illumos/gcc.
 
 The currently used branches of `illumos/gcc` are:
 
-| name        | description                                                   |
+| name        | description                                                  |
 | ----------- | -------------------------------------------------------------|
-| `il-10_4_0` | GCC 10.4 branch: current primary compiler                    |
-| `il-7_5_0`  | GCC 7.5 branch: current shadow compiler                      |
+| `il-14_2_0` | GCC 14.2 branch: current primary compiler                    |
+| `il-10_4_0` | GCC 10.4 branch: current shadow compiler                     |
 
 Each version of the compiler we intended to endorse/insist upon the use of
 during the RTI process is tagged in the form `gcc-X.Y.Z-il-N` where _X.Y.Z_ is

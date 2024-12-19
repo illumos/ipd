@@ -59,7 +59,7 @@ information is available at the end of this document.
 | draft | [IPD 45 Flow trees in the MAC datapath](./ipd/0045/README.adoc)
 | predraft | [IPD 46 IP Tunnel and IPsec ergonomics](./ipd/0046/README.adoc)
 | predraft | [IPD 47 Trust, but VERIFY(): Assertions in the Kernel](./ipd/0047/README.adoc)
-
+| predraft | [IPD 48 Improving Illumos on IPv6-primary and IPv6-only networks](./ipd/0048/README.adoc)
 
 ## Contributing
 

@@ -1,0 +1,20 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: published
+:revremark: State: {state}
+:authors: Glorfindel <glorfindel@example.com>, Ecthelion <ecthelion@example.com>
+:sponsor:
+
+= IPD <num> <title>
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+

@@ -1,0 +1,391 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: published
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 49 Advancing the C Standard in illumos
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+The current predominant programming language in illumos is C. In the
+early days of the illumos code base there was no standard for the C
+programming language. In the intervening years the C language has
+continued to evolve and advance through the efforts of the C language
+working group https://www.open-std.org/JTC1/SC22/WG14/[WG14]. Much like
+https://github.com/illumos/ipd/blob/master/ipd/0007/README.md[IPD 7
+illumos GCC Maintenance], this IPD lays out the general guidelines and
+policies for how the C standard can be advanced for software we build as
+well as the constraints that we have.
+
+In particular this IPD proposes and clarifies:
+
+* Adopting the C17 standard for all new software today.
+* Outlines the process by which new C versions can be adopted and
+  considered.
+* Describes when it's appropriate to change the C standard for software
+  and what's expected when doing so.
+* Changes to `cw` to reduce surprises.
+
+In addition, this IPD clarifies:
+
+* Cases where we cannot change the C standard and need to be
+  circumspect about exposing newer language features.
+* The process for adopting new language features for use in illumos-gate.
+
+Critically this IPD does not change:
+
+* Our ability to add header and library support for newer C versions
+  than we are using.
+
+== Background
+
+C standardization has gone through several different phases. The C
+standard describes:
+
+. The C language itself. This is its grammar, core types, the
+pre-processor, and more.
+. The C library. This includes the various headers and functions. This
+is a major part of where `libc` comes from.
+. The environment that C operates in, which includes the notion of the
+abstract machine, character sets, and related.
+
+K&R C::
+
+This is C before it was standardized. While there are many features that
+have stayed the same, one of the major differences is how functions and
+types were declared.
+
+C89::
+
+This was the first major version of C. It was published by ANSI in 1989
+and then ISO in 1990. This is sometimes called ANSI C, C89, and C90. It
+changed the language in several ways from K&R C and forms the baseline
+of the language across the industry.
+
+C99::
+
+This was the second major revision of C. It was published in 1999 by
+ISO. This added various features such as flexible array members,
+variable declarations that could occur in other locations, and expanded
+the library substantially.
+
+C11::
+
+This was the third major revision of C. It was published by ISO in 2011.
+This added numerous features around atomics, threading support, type
+generic expression, anonymous structures and unions, etc.
+
+C17::
+
+This was published in 2017 and did not add new features to the language
+or library. It consolidated clarifications and technical corrections.
+
+C23::
+
+This is the most recent version of C. It was finished in 2023 though
+published in 2024, though it is called C23. This added several new
+language features and concepts ranging from digit separators, function
+attributes, bit-specific types, binary notation, and continued the
+expansion of the standard library.
+
+In general, the C standard is written such that it is possible for an
+operating system like illumos to support all major revisions of the C
+standard. Different software expects and operates across these versions
+and selects the version that they desire to use with compiler flags.
+Most programs use features beyond the C standard which may be part of
+the operating system, POSIX, or third-party packages. Software which
+only uses features and libraries which are described in the standard are
+called "strictly conforming".
+
+Compilers implement support for the different languages versions and
+have a default version that they use if nothing is specified on the
+command line and a series of flags to select the language. The most
+common form of this flag, used across `gcc` and `clang`, is `-std`. In
+addition, the compilers often have their own language extensions. Using
+gcc as an example, if someone wanted to target C99, strictly conforming
+software would use `-std=c99` where as software that is not strictly
+conforming, would use `-std=gnu99`, though this also provides access to
+additional language features.
+
+When software opts into strictly conforming mode, this means that unless
+something else is specified such as requesting a version of POSIX or the
+use of the `__EXTENSIONS__` flag, then we are encouraged to only make
+the standard's contents visible in headers defined by the standard. For
+example, ISO C defines `<stdio.h>`, so it is something that we have to
+play symbol visibility games in. Conversely, if program that is being
+compiled in a strictly conforming mode includes a header like
+`<libumem.h>` or `<libnvpair.h>` then we do not need to do anything
+special here because they are not a part of the standard.
+
+In general, when we are building software in illumos, we are not
+building in a strictly conforming manner. This means that we end up
+having to use the `gnu` variants with compilers like `gcc`.
+
+Finally, it's worth noting that specific versions of POSIX end up tying
+to specific version of the C language. For example, POSIX 2024 is tied
+to C17, where as older versions of the specification might expect C99.
+Ultimately, illumos does not force the requirement that an application
+building against a specific version of POSIX uses the corresponding C
+language version. In practice, this is something where things shift
+around and it's important that we retain flexibility for third-party
+software.
+
+=== Standards Impact in illumos
+
+The standard that's chosen changes how software is built and what
+language features are available. In general the choices here are
+internal to illumos, but there are a few cases where this isn't the case
+and therefore it's important to call out and understand them:
+
+. Public Headers
+. Libraries tied into the "values" files
+
+Let's go into each of these in turn.
+
+==== Public Headers
+
+Let's start with public headers, as this is a more straightforward case
+to understand. Many headers have a long and storied history in illumos.
+This is particularly the case with things that have formed long-term
+stable interfaces. Examples of these include things like C and POSIX
+headers, libraries that have existed for quite some time, and kernel
+headers that are part of the DDI.
+
+While compilers have changed the default C version that they use, there
+is a long history here and therefore special care has to be taken before
+using features from outside of C89 in these headers. Even using a C99
+flexible array member can suddenly cause software to no longer compile.
+While C23 is out, not all of its features are supported and most
+software will not build with it, so using a `_BitInt` is going to cause
+almost all software grief.
+
+This is not a blanket ban. Some features can still be used with the
+proper guards; however, care needs to be taken. If you're uncertain,
+please consult with the core team. Note, for internal headers and new
+libraries, this constraint doesn't hold; however, some features should
+be thought of as viral. For example, if you use a flexible array member,
+all consumers must build at least on C99. These days, that's fairly
+reasonable. However, it may be a different story with C23 (today in
+2024). Related, if this is intended to support third-party software,
+then it's important not to cut them off and be as flexible as possible.
+
+Ultimately, with public headers there are shades of grey. Please consult
+the core team if you have questions while working in here.
+
+==== Libraries and Values Files
+
+The C language has changed its defaults and what is supported since C89.
+For example, C23 requires some functions treat `0b` as a prefix for a
+binary number much like `0x` is used for hexadecimal. But this was not
+present in the past. In other cases, these choices have much more
+impact. While in many circumstances there are cases where we have used a
+`#pragma redefine_extname` to select between multiple different
+implementations that tie to the C standard, for some pieces, the
+compiler will explicitly link in a "values" file such as `values-xpg4.o`
+or `values-xpg6.o` which can be found in
+https://github.com/illumos/illumos-gate/tree/master/usr/src/lib/crt/common[usr/src/lib/crt/common].
+
+These values files define symbols that change the behavior of software
+and select between different sets of behaviors. If we were to build libc
+and libm in such a way as to link these in, then that would make it
+impossible for users to get the behavior that they themselves explicitly
+requested.
+
+As such, these are places that you cannot use language features or
+change CSTD arbitrarily.
+
+=== Selecting a C Standard
+
+Today, one selects a C standard by setting the `CSTD` macro in a
+corresponding Makefile. If no standard is specified, than
+`Makefile.master` will set the default to the equivalent of `gnu89`.
+Currently is all built with a consistent C standard in `Makefile.uts`
+and this is not overridden. Unlike the kernel, libraries and commands
+must individually opt into a new C standard. Today, a minority of
+commands and libraries opt into these; however, of those that have been
+added recently, most do.
+
+There are a few challenges with this system as it stands today. The
+biggest is that if you make a typo and use a macro that is not valid,
+then you will end up building something without an explicit `-std=` flag
+specified. When this happens, the C compiler will use whatever it likes
+for its default, which changes with major versions of the compiler. This
+means that folks switching between the supported compilers are in for a
+rude surprise and further complicates the process for upgrading the
+compiler.
+
+== `cw` changes
+
+Based on experiences where we've had software building with an
+unexpected C version, we will modify `cw`, the compiler wrapper, to
+specifically require a C version has been explicitly requested via a
+`-std=` style flag. `cw` will not enforce the validity of this flag,
+merely that it is present.
+
+At this time, we will not change `cw` to do the same for C++. That is
+left as possible future work.
+
+As part of this, all software that was incorrectly specifying a C
+standard version will be locked in at the current one that it is using.
+The default of gcc 10.x, our primary as of this writing, is gnu17.
+
+== Adopting C17
+
+We concretely propose that we set C17 as our target language and
+specifically use the `-std=gnu17` variant. Note, that per existing
+policy this does not mean using every feature of C17 or every GNU
+extension. See <<sec-lang>> for more information.
+
+Today software is using a combination of either C89 or C99. We opt to
+jump to C17 for a few reasons. In an ideal world, we would be able to
+start using C23 right away. There are numerous features of the language
+that are beneficial such as digit separators, binary prefixes, arbitrary
+width Bit integers, the ability to specify enumeration sizes, better
+zero initialization syntax that takes care of padding, etc.
+Unfortunately, it is still a bit too early for us to jump to C23 for
+several reasons:
+
+* gcc 10, our current primary compiler, had very limited support for
+C23 and uses a different flag for it, `-std=c2x`.
+* gcc 14, our current shadow compiler, does support `-std=c23`;
+however, it does not use the proper value for `__STDC_VERSION__` and
+does not have full attribute support. It was released before the
+specification was finished. With the inability to specify the proper
+value for `__STDC_VERSION__` that means that you cannot opt into C23
+features in headers.
+* Our headers do not currently support some of the features required
+for C23, which is an area of ongoing work. For example, some items like
+`bool` are now keywords and therefore the existing `<stdbool.h>` header
+needs changes to work in C23.
+
+When it comes to C11 versus C17, C17 is effectively a cleaned up version
+of C11 and therefore we see that there's no reason not to prefer C17.
+There isn't much that going back would buy us. In particular, while we
+propose adding C17 support in the Makefiles and suggesting that new
+software explicitly select this as a C standard in its Makefiles, we
+will not add macros for C11.
+
+So really, this comes down to why C17 versus C89 or C99. In general,
+there are newer language features that we would like to take advantage
+as a project over time. We can see this by how most new software in
+illumos uses C99, to get access to the `bool` type or to flexible array
+members. There are many features where we rely on the fact that the
+compiler is already exposing them in older environments. For example,
+`_Static_Assert` is technically only valid in C11, but we can get away
+with using it for `CTASSERT` due to how gcc operates and the fact that
+the `CTASSERT` macro is private to illumos.
+
+We do not see C17 as a stopping point, but rather the current local
+maxima. Continuing to move forward and being in a position to adopt
+better language features ultimately helps the project.
+
+== Adopting a new C Standard for illumos
+
+To consider adopting a new C standard for the project, there are several
+things that need to be considered:
+
+. Both our primary and shadow compilers need to have full support for
+the language.
+. Any linters or other tools, such as `smatch` need to have sufficient
+support for the language. Note, this covers baseline language support.
+This is also a factor in <<sec-lang>>.
+. Our headers and library need to cover a sufficient portion of the
+specification. Give the need to have both the primary and all shadow
+compilers in good shape, this usually will already be in okay shape. It
+is up to the core team to make a final call on what else is missing
+here.
+. We need to ensure that adoption of the newer language as a baseline
+(regardless of features) does not impugn our ability to debug the
+software.
+
+[[sec-lang]]
+== Adopting New C Language Features
+
+Just because we adopt a new version of the C language does not mean that
+all language level features in it are fair game. The same is not true
+for library features, which we generally strive to make available in all
+standards modes, unless there is a specific language feature tied to it.
+
+Broadly speaking, the language features that we use and how they
+interact in the broader system are all present in
+https://illumos.org/man/7/style.7[style(7)]. Before adopting a new
+language feature, discuss with the core team. In particular, aspects
+that folks are looking for when adopting features are:
+
+* Is the feature part of the standard, or is it specific to a single
+  compiler? In general, we aim to avoid the latter.
+* What is the relative utility of this feature? Does it provide notable
+  quality of life improvements?
+* What is the impact on debugability? Taking advantage of new features,
+  but not being able to debug software that uses them like we can is a
+  major challenge. Broadly speaking, illumos values the debugability of
+  our software, whether that be through things like the /proc tools,
+  DTrace, mdb, core files, and numerous other technologies.
+* What is the impact on maintainability and readability? Code in illumos
+  is read many more times than it is written. Being able to have a
+  maintainable code base that can be understood by both newcomers and
+  veterans alike is important to us.
+
+Ultimately, for some things this may be straightforward, while others
+will have tradeoffs. It's important to get different perspectives, but
+please keep in mind that some of the answers to this may be subjective
+and different individuals will weigh the answers to these questions
+differently.
+
+== When to Adjust the C Standard for Existing Software
+
+While this IPD suggests what to do for new software, existing software is
+a bit more complicated.
+
+Our rule of thumb is that if you need a new feature, then that is a good
+reason to change the C standard. In such cases, that does mean that the
+testing burden will be somewhat higher as changing the C version can
+cause the compiler to build things in different ways. Folding that as
+part of broader functional testing is reasonable.
+
+If this is not being driven based on need, then equal care still needs
+to be taken. While opinions can vary on the utility in these cases,
+changes will still be accepted as long as the testing burden is met.  If
+changing it can be done in a
+https://illumos.org/man/1ONBLD/wsdiff[wsdiff] clean way, then that is
+good.  Otherwise, then broad functional testing is required to validate
+that there are no regressions that are introduced by this. While some
+software has regression testing in `usr/src/test` as part of various
+test suites, this may often be insufficient. If in doubt, please reach
+out to a core team member.
+
+The kernel represents a particularly tricky case here due to the fact
+that a single C standard is used across the board there. As additional
+features, particularly starting with C23, become more relevant for
+kernel development, we will figure out what a transition plan looks
+like. This may involve allowing individual modules to build at a
+different standard or another approach depending on what the impact from
+wsdiff and related shows.
+
+At the end of the day, the specifics of what's being changed, the
+benefits, the risk, and related will be what's important.
+
+== Project Plan
+
+The project plan as it stands is fairly minimal as the majority of this
+IPD is about project policy. It proposes changes that will:
+
+* Enforce that `cw` will require a C standard for C based software.
+* Introduce new Makefile symbols for the GNU variant of C17.
+** Software that is using erroneous `CSTD` macros will be set at the
+current version they are using.
+
+While there are several things that we could explore around how to
+improve new software getting the current target C version or changing
+the C standard used for the kernel they are not a concrete part of this
+proposal and are left to future investigation and proposals.

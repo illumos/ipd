@@ -60,6 +60,7 @@ information is available at the end of this document.
 | predraft | [IPD 46 IP Tunnel and IPsec ergonomics](./ipd/0046/README.adoc)
 | predraft | [IPD 47 Trust, but VERIFY(): Assertions in the Kernel](./ipd/0047/README.adoc)
 | predraft | [IPD 48 Improving Illumos on IPv6-primary and IPv6-only networks](./ipd/0048/README.adoc)
+| predraft | [IPD 49 Advancing the C Standard in illumos](./ipd/0049/README.adoc)
 
 ## Contributing
 

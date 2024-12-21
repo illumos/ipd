@@ -1,0 +1,84 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Bill Sommerfeld <sommerfeld@hamachi.org>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 48 Improving Illumos on IPv6-primary and IPv6-only networks
+{authors}
+
+== Introduction
+
+Many network providers are moving to a world where IPv6 is the
+preferred network layer protocol - including charging extra for IPv4
+addresses.
+
+Illumos is missing a few functional pieces that complicate its
+installation and use on an IPv6-only network.
+
+NOTE: in the predraft state this is something of a
+not-entirely-coherent laundry list of issues I've noticed and which
+I've started to work on.  Future updates will include specific
+proposals.
+
+== Configuring autoconfiguration preferences
+
+Some autoconfigured parameters learned from an interface (notably
+default route and DNS client configuration) may have system-global
+impact; there should be a way for an administrator to control which
+interfaces can be used as source for these parameters.
+
+== DNS resolver autoconfiguration
+
+=== DNS configuration via DHCPv6
+
+There is currently no way for DNS configuration to make its way from
+the DHCP client to /etc/resolv.conf or other resolver configuration.
+
+=== DNS configuration from Router Advertisement options
+
+As with DHCPv6, there is currently no way for DNS configuration to
+make its way from ndpd client to /etc/resolv.conf or other resolver
+configuration.
+
+== ndpd.conf vs ipadm
+
+The in.ndpd daemon draws its configuration mainly from
+`/etc/inet/ndpd.conf` but can pull some configuration from ipadm via
+ipmgmtd; we should try to move more of this -- perhaps all of it --
+into ipadm.
+
+== DHCPv6 prefix delegation
+
+== Site-local addresses in documentation
+
+We have far too many examples using the long-deprecated site-local
+addresses in `fec0::/10`; these should generally change to use ULA
+(unique local addresses) in `fd00::/8`.
+
+== ipadm irregularities
+
+=== addrprop disabled for addrconf addresses
+
+
+
+=== deprecated addrconf addresses get lost
+
+If a router advertisement is deprecated, the addresses shown in `ipadm
+show-addr` output are shown as `intf0/??` instead of with the name of
+their associated address object.
+
+
+

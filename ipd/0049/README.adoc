@@ -2,7 +2,7 @@
 :toc: left
 :numbered:
 :icons: font
-:state: predraft
+:state: draft
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor:
@@ -305,7 +305,7 @@ compilers in good shape, this usually will already be in okay shape. It
 is up to the core team to make a final call on what else is missing
 here.
 . We need to ensure that adoption of the newer language as a baseline
-(regardless of features) does not impugn our ability to debug the
+(regardless of features) does not hinder our ability to debug the
 software.
 
 [[sec-lang]]

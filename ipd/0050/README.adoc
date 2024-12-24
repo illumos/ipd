@@ -7,7 +7,7 @@
 :authors: iximeow <illumos@iximeow.net>
 :sponsor:
 
-= IPD 50 Retiring `fipe(7D)`
+= IPD 50 Retiring `fipe(4D)`
 {authors}
 
 [cols="3"]
@@ -19,7 +19,7 @@
 
 == Introduction
 
-The `fipe(7D)` driver provides some power-saving functionality on
+The `fipe(4D)` driver provides some power-saving functionality on
 particular systems with "Fully Buffered DIMM" modules. Specifically,
 systems with a North Bridge chipset with vendor ID 8086 and device ID
 1A38 or 360B. In product name terms, these are the Intel 5000 and 7300
@@ -31,16 +31,16 @@ While the NetBurst cores predate x86-64 by just a bit, it seems these
 Xeon models are all Prescott or later, putting these at some of the
 oldest still-supported x86-64 processors.
 
-`fipe(7D)` was integrated in commit `eca2601c`, from
+`fipe(4D)` was integrated in commit `eca2601c`, from
 https://illumos.org/opensolaris/ARChive/PSARC/2009/289/index.html[PSARC/2009/289]
 "FBDIMM Idle Power Enhancement (FIPE) driver".
 
 On source review, I think wakeups at inopportune times can cause
-`fipe(7D)` to idle just as a system has become busy, and it is the sole
+`fipe(4D)` to idle just as a system has become busy, and it is the sole
 motivator for additional complication to i86pc power management for all
 x86 systems.
 
-`fipe(7D)` was the sole outside-the-kernel user of the CPU Idle
+`fipe(4D)` was the sole outside-the-kernel user of the CPU Idle
 Notification framework added with
 https://illumos.org/opensolaris/ARChive/PSARC/2009/115/index.html[PASRC/2009/115].
 The notification framework itself is fine - it's also used for lazy TLB
@@ -55,11 +55,9 @@ This IPD proposes:
 
 * Removing `usr/src/uts/i86pc/io/fipe`, as well as its header and
   Makefile rules
-* Removing `usr/src/pkg/manifests/driver-i86pc-fipe.p5m`
-* Removing other `fipe` packaging declarations under
-  `usr/src/pkg/packages.i386/` as needed.
+* Marking the `fipe` package `obsolete`
 
-And with `fipe(7D)` retired, a followup change to:
+And with `fipe(4D)` retired, a followup change to:
 * Remove the `check_func` and `check_arg` parameters to
   `cpu_idle_enter`
 * Remove the `acpi_cpu{_mwait_ipi,_mwait,}_check_wakeup` functions
@@ -72,7 +70,7 @@ work as well as before, and notably should see no change under load.
 
 == Background
 
-`fipe(7D)` was integrated back when it seemed that FB-DIMM might be the
+`fipe(4D)` was integrated back when it seemed that FB-DIMM might be the
 future of memory architecture. As history would have it, though, the
 industry moved towards DDR3 and registered DIMMs, rather than FB-DIMM
 and the corresponding "Advanced Memory Buffer" (AMB) modules to
@@ -84,15 +82,15 @@ be a feature on corresponding chipsets to power off some parts of the
 DIMM while memory is unused, reducing idle power and heat some.
 
 The check functions added with the CPU Idle Notification framework which
-`fipe(7D)` builds on, though, are (perhaps surprisingly) stateful: they
+`fipe(4D)` builds on, though, are (perhaps surprisingly) stateful: they
 may enable and disable interrupts, and may register that a CPU has
 exited idle if an interrupt was processed.
 
-`fipe(7D)` is the only caller of these check functions, and calls them
+`fipe(4D)` is the only caller of these check functions, and calls them
 only after checking that when the current CPU is idled, all CPUs will be
 idle. From source review, I believe that if a CPU wakes between this
 point and actually idling, for example in handling a NIC interrupt,
-`fipe(7D)` will still incorrectly take operations to reduce FBDIMM power
+`fipe(4D)` will still incorrectly take operations to reduce FBDIMM power
 use. This is another point where documentation and effect are hard to
 track down: would the system actually idle? Will the idle attempt be a
 no-op? Will something else happen?

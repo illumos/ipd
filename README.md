@@ -61,7 +61,7 @@ information is available at the end of this document.
 | predraft | [IPD 47 Trust, but VERIFY(): Assertions in the Kernel](./ipd/0047/README.adoc)
 | predraft | [IPD 48 Improving Illumos on IPv6-primary and IPv6-only networks](./ipd/0048/README.adoc)
 | draft    | [IPD 49 Advancing the C Standard in illumos](./ipd/0049/README.adoc)
-| draft    | [IPD 50 Retiring `fipe(7D)`](./ipd/0050/README.adoc)
+| draft    | [IPD 50 Retiring `fipe(4D)`](./ipd/0050/README.adoc)
 
 ## Contributing
 

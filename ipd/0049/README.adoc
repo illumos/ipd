@@ -76,8 +76,8 @@ C99::
 
 This was the second major revision of C. It was published in 1999 by
 ISO. This added various features such as flexible array members,
-variable declarations that could occur in other locations, and expanded
-the library substantially.
+variable declarations in loops and other places in the function body,
+and expanded the library substantially.
 
 C11::
 
@@ -113,7 +113,7 @@ command line and a series of flags to select the language. The most
 common form of this flag, used across `gcc` and `clang`, is `-std`. In
 addition, the compilers often have their own language extensions. Using
 gcc as an example, if someone wanted to target C99, strictly conforming
-software would use `-std=c99` where as software that is not strictly
+software would use `-std=c99` whereas software that is not strictly
 conforming, would use `-std=gnu99`, though this also provides access to
 additional language features.
 
@@ -207,13 +207,13 @@ change CSTD arbitrarily.
 === Selecting a C Standard
 
 Today, one selects a C standard by setting the `CSTD` macro in a
-corresponding Makefile. If no standard is specified, than
+corresponding Makefile. If no standard is specified, then
 `Makefile.master` will set the default to the equivalent of `gnu89`.
-Currently is all built with a consistent C standard in `Makefile.uts`
-and this is not overridden. Unlike the kernel, libraries and commands
-must individually opt into a new C standard. Today, a minority of
-commands and libraries opt into these; however, of those that have been
-added recently, most do.
+Currently, the kernel is all built with a consistent C standard in
+`Makefile.uts` and this is not overridden. Unlike the kernel, libraries
+and commands must individually opt into a new C standard. Today, a
+minority of commands and libraries opt into these; however, of those
+that have been added recently, most do.
 
 There are a few challenges with this system as it stands today. The
 biggest is that if you make a typo and use a macro that is not valid,
@@ -241,7 +241,7 @@ The default of gcc 10.x, our primary as of this writing, is gnu17.
 
 == Adopting C17
 
-We concretely propose that we set C17 as our target language and
+We concretely propose that we set C17 as our target version of C and
 specifically use the `-std=gnu17` variant. Note, that per existing
 policy this does not mean using every feature of C17 or every GNU
 extension. See <<sec-lang>> for more information.
@@ -286,7 +286,7 @@ with using it for `CTASSERT` due to how gcc operates and the fact that
 the `CTASSERT` macro is private to illumos.
 
 We do not see C17 as a stopping point, but rather the current local
-maxima. Continuing to move forward and being in a position to adopt
+maximum. Continuing to move forward and being in a position to adopt
 better language features ultimately helps the project.
 
 == Adopting a new C Standard for illumos

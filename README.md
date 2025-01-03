@@ -36,7 +36,7 @@ information is available at the end of this document.
 | draft     | [IPD 22 Unsharing shared Libraries](./ipd/0022/README.md)
 | predraft  | [IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform](./ipd/0023/README.md)
 | predraft  | [IPD 24 Support for 64-bit ARM](./ipd/0024/README.md)
-| draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.md)
+| draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.adoc)
 | draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)
 | published | [IPD 27 Sunset TNF](./ipd/0027/README.md)
 | draft     | [IPD 28 EOF Legacy Network Driver interfaces](./ipd/0028/README.md)

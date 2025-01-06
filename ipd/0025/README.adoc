@@ -172,6 +172,20 @@ helper will re-exec the original command.
    and include authenticated profiles when checking for additional
    Authorisations and exec attributes to assign.
 
+== PAM Authentication
+
+The `pfauth` command authenticates the invoking user via PAM using `pfexec` as
+the service name. If nothing is explicitly defined for this service in
+https://illumos.org/man/5/pam.conf[pam.conf(5)] the user will typically be
+required to enter their own login password.
+
+== Caching
+
+It may be convenient to support caching a successful authentication for a short
+time to avoid repeated prompts for authentication, although entering a profile
+shell is probably more convenient in general. This can be achieved with a
+caching PAM module if necessary - no support for caching will be built into
+`pfexecd` itself.
 
 == Affected components
 
@@ -489,14 +503,6 @@ authentication phase when an authenticated profile is involved.
 ----
 6256:AUE_pfauth:pfauth:ps,ex,ua,as
 ----
-
-== Caching
-
-It may be convenient to support caching a successful authentication for a short
-time to avoid repeated prompts for authentication, although entering a profile
-shell is probably more convenient in general. This can be achieved with a
-caching PAM module if necessary - no support for caching will be built into
-`pfexecd` itself.
 
 == Examples
 

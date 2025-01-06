@@ -122,33 +122,43 @@ helper will re-exec the original command.
 
 [source]
 ----
-       Userspace                  |       Kernel
-       ---------                  |       ------
-                                  |
-    +------------------------+    |
-    | pfexec                 |    |                   +---------<--------+
-    |                        |    |                   |                  |
-    |  setpflag(PRIV_PFEXEC) |                        |                  |
-    |                        |        +---------------v-------------+    |
-    |  call exec()           +--------> exec()                      |    |
-    +------------------------+        |   |                         |    ^
-                                      |   |                         |    |
-    +------------------------+        | call pfexecd                |    |
-    | pfexecd                <--------+ (include auth status)       |    |
-    |                        |        |                             |    |
-    |   getexecuser()        +--------> pfexecd returns auth        |    |
-    +------------------------+        | required(1)                 |   (2)
-                                      |   |                         |    |
-    +------------------------+        |   |                         |    |
-    | pfauth                 <--------+ exec(pfauth) as             |    |
-    |                        |        | interpreter                 |    |
-    |  authenticate (pam)    |        |                             |    |
-    |  setpflag(PFEXEC_AUTH) |        |                             |    |
-    |  exec(original cmd)    |        |                             |    |
-    +-----------------+------+        +-----------------------------+    ^
-                      |                                                  |
-                      |                                                  |
-                      +----------->------------>------------>------------+
+     Userspace              |                  Kernel
+     ---------              |                  ------
+                            |
+                            |                     +------------------------+
+                            |                     |                        |
+                            |                     |                        |
++-----------------------+   |   +-----------------|-------------------+    |
+| pfexec                |   |   |                 |                   |    |
+|                       |   |   |                 |                   |    |
+|  setpflag(PRIV_PFEXEC)|   |   |                 |                   |    |
+|                       |   |   |                 v                   |    |
+|  call exec(2)         +-------+-------------> exec()                |    |
++-----------------------+   |   |                 |                   |    |
+                            |   |                 |                   |    |
++-----------------------+   |   |                 v                   |    |
+| pfexecd               <-------+--------- upcall to pfexecd          |    |
+|                       |   |   |                                     |    |
+|  getexecuser()        +-------+---------> apply attributes(1)       |    |
++-----------------------+   |   |           (privs/auths/IDs)         |    |
+                            |   |                 |                   |    |
+                            |   |                 v                   |   (2)
+                            |   |            auth required?           |    |
+                            |   |                |  |                 |    |
+                            |   |                |  |                 |    |
+                            |   |             +--+  +--+              |    |
+                            |   |             |        |              |    |
+                            |   |             v        v              |    |
++------------------------+  |   |            YES       NO             |    |
+| pfauth                 |  |   |             |        |              |    |
+|                        |  |   |             v        v              |    |
+|   authenticate (PAM)   <------+-- exec pfauth        continue exec  |    |
+|   setpflag(PFEXEC_AUTH)|  |   |   (as interp)              |        |    |
+|   exec(original cmd)   |  |   |                            |        |    |
++----------+-------------+  |   +----------------------------+--------+    |
+           |                |                                v             |
+           |                                                               |
+           +--------------------------------------------------------------->
 ----
 
 1. pfexecd will also specify any additional privileges that should be

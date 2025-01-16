@@ -1,0 +1,91 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Dan McDonald <danmcd@mnx.io>, Josh Clulow <josh@sysmgr.org>
+:sponsor:
+
+= IPD 50 ZFS Maintenance and Consumption of OpenZFS Technology
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+The Zettabyte File System (ZFS) is core technology for illumos, and its
+flagship file system. Until 2019, illumos ZFS was the upstream for the
+OpenZFS community as well. The file system is one of the most important
+things an operating system provides as a layer of infrastructure. illumos
+maintains ZFS as first party code, in keeping with all of our other standards
+and practices.
+
+In the past six years, illumos ZFS has incorporated features from the current
+OpenZFS project. Not all have been successfully incorportated.  The purpose
+of this RFD is to restate our commitment to ZFS in illumos being first-party
+code, what we learned from past consumption of OpenZFS technology, and to lay
+out policies and strategies for incorporating OpenZFS technology into illumos
+ZFS going forward.
+
+== Background
+
+The history of illumos as a still-open fork of Sun Microsystems' OpenSolaris
+is well-documented[https://illumos.org/docs/about/history/]. As part of
+illumos, the original ZFS implementation continued to be open-source even
+after Oracle closed Solaris in August, 2011.  Not long after that, other
+operating systems began porting ZFS to their own platforms. FreeBSD took
+illumos to be their upstream, and the ZFS on Linux (commonly abbreviated as
+ZoL) project forked off illumos ZFS for porting into Linux.
+
+In 2013, the OpenZFS project chartered.  Its official upstream was illumos
+ZFS, and it included all ZFS ports in its community. This continued for a
+number of years. During that time, ZoL moved forward at a more aggressive
+pace of development. In 2019, ZoL merged in to the OpenZFS downstream and
+OpenZFS became a completely independent project.
+
+== Lessons Learned and Ongoing illumos ZFS Policy
+
+A primary goal of illumos is reliability: both the integrity of data stored
+by users, and the availability of that data on running systems. Performance
+and new features are a secondary goal.  When illumos takes patches from
+working branches or from forks, the patches need to be reviewed locally by
+our community, and the illumos core team reserves the right to modify them to
+meet local standards. All changes must be tested in their final form; it's
+good to highlight testing from other projects in your notes, but it is
+generally not sufficient on its own.
+
+This primary goal has occasionally come into conflict with desired technology
+in OpenZFS. Consuming such technology usually resolves these conflicts merely
+by further testing, or by changes which illumos will offer back to OpenZFS. A
+key to making sure this works is for illumos to ensure that the OpenZFS
+technology being consumed is, per earlier, in its final form. That has
+sometimes not been the case.
+
+`XXX KEBE SAYS INSERT ZFS CRYPTO TEXT HERE`
+
+== Interoperability
+
+A possible concern for illumos ZFS is interoperability with OpenZFS and with
+Oracle Solaris, especially in the sending and receipt of ZFS send streams, as
+well as whole-pool import or export. While not always practical, using send
+streams or importing or exporting whole pool could be more efficient than
+using file-level primitives for data transfer.
+
+With respect to Oracle Solaris, the send-stream advice is simply to make sure
+the sending dataset was generated from a SPA version of 28 or less, and a and
+ZFS Posix Layer (ZPL) version that was equal to or less than 5 on both
+illumos and Oracle Solaris.  The same versioning restrictions apply to the
+import and export of pools.
+
+OpenZFS introduce the concept of feature-flags, and SPA version 5000
+indicates that pool feature-flags are present, and should be examined.
+
+`XXX KEBE SAYS A LOT MORE NEEDS TO GO HERE... or is it its own IPD?`
+
+
+== The illumos Policy for Consuming OpenZFS Technology
+

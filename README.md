@@ -61,6 +61,7 @@ information is available at the end of this document.
 | predraft | [IPD 47 Trust, but VERIFY(): Assertions in the Kernel](./ipd/0047/README.adoc)
 | predraft | [IPD 48 Improving Illumos on IPv6-primary and IPv6-only networks](./ipd/0048/README.adoc)
 | published | [IPD 49 Advancing the C Standard in illumos](./ipd/0049/README.adoc)
+| predraft | [IPD 50 ZFS Maintenance and Consumption of OpenZFS Technology](./ipd/0050/README.adoc)
 
 ## Contributing
 

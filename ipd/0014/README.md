@@ -26,7 +26,7 @@ many more files on a single filesystem.
 
 ## Possible solutions
 
-The problem of large files was addressed within a 32-bit system by adding 
+The problem of large files was addressed within a 32-bit system by adding
 a new transitional compilation environment for 32-bit software, see
 lfcompile(5). This approach was specifically to allow code to access 64-bit
 quantities at a time when a full 64-bit option was not available. It
@@ -49,6 +49,13 @@ It's possible that there may be areas beyond userland applications that
 are impacted. Such as:
 
 * 32-bit timestamps in the UFS on-disk format
+* 32-bit timestamps in utmp, wtmp, lastlog, information (w(1), uptime(1) etc.)
+* 32-bit timestamps used for "uniqueness" via uniqtime32() in the kernel
+* ZFS clamps times to 32bit in zfs_setattr(), but says the problem year is 2039
+* `KRB5_KDB_EXPIRATION` is suspiciously Jan 1st 2038
+* NFS `nfs_allow_preepoch_time` tunable uses
+* Olson zic/zoneinfo needs updating to the "new" format (I think libc
+  `localtime.c` talks about this)
 
 ## Implementation
 
@@ -131,4 +138,3 @@ Solaris 10, although it was for a slightly different purpose.)
 
 
 ## Testing
-

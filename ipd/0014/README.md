@@ -1,5 +1,5 @@
 ---
-author: Peter Tribble, Dan McDonald (will need others...)
+author: Peter Tribble, Dan McDonald, Rich Lowe (will need others...)
 state: predraft
 ---
 

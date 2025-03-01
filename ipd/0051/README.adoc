@@ -1,0 +1,279 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 51 Time Zone Information Maintenance
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+This IPD goes into the background of how time zone information is stored
+and maintained in illumos and the shared IANA database. This IPD
+covers at a high-level:
+
+* Guidelines for how to perform updates to time zone code
+** The existing time zone data update path is not really changed
+* Future directions for improving the state of time zone interfaces and
+  functionality
+* Clarifications to the stability of zic(8) and zdump(8)
+
+== Background
+
+Time zone information describes information about the messy reality of
+time zones, when time shifts for things such as daylight savings time,
+and all the shifts that have happened over the decades. This information
+is currently maintained by https://www.iana.org/time-zones[IANA] and has
+been called the Olson database and zoneinfo. The collection of
+information published by IANA can be broken down into three logical
+collections:
+
+. There is the time zone database information itself. This contains the
+information about the different time zones that exist, when changes to
+them occur, the various areas and locations they are broken into, etc.
+In illumos this information is generally kept in
+`usr/src/data/zoneinfo`. This information is generally distributed by
+IANA as the tzdata package.
+
+. There are the tools that are used to parse and dump the time zone
+information itself. These are the time zone compiler
+https://illumos.org/man/8/zic[zic(8)] and the time zone dumper
+https://illumos.org/man/8/zdump[zdump(8)]. This is generally distributed
+as part of the tzcode package. In illumos these are found in
+`usr/src/cmd/zic` and `usr/src/cmd/zdump`.
+
+. The last bit that IANA distributes is code that represents the common
+standard C and POSIX interfaces such as
+https://illumos.org/man/3C/localtime[localtime(3C)]. Our code for these
+implementations is derived from it, but it is not used verbatim. This is
+different from `zic` and `zdump` where we more or less use the upstream
+code more or less as is (with some minor reorganization between
+`private.h` and `tzfile.h`). These contents are also part of the
+tzcode package.
+
+Separately from this, illumos has libzoneinfo, which provides a set of
+private interfaces that are used to get access to the zone information
+database and information about the various areas, countries, and time
+zones within those.
+
+=== Maintenance in illumos
+
+To date, illumos has been regularly updating the time zone information
+portion of this. This process has been relatively streamlined with
+documentation in-tree for how to proceed and how to update the various
+packaging. Here's a link to the current (snapshoted at the point of
+writing) version of
+https://github.com/illumos/illumos-gate/blob/a5b7f75fd1ed126068f42cd7ee368ce34c95973f/usr/src/data/zoneinfo/README.illumos[README.illumos]
+which describes how this process has been performed. In general, this
+IPD does not propose much of any changes to this part of the process. It
+has been working relatively well, but starting with 2025a requires
+updated tools.
+
+The tools in particular have not been updated since well before illumos
+was forked from OpenSolaris, except for a minor update in the form of
+https://www.illumos.org/issues/6869[#6869 Update zdump to better-handle
+POSIX timezones]. In general folks have been focused on keeping the zone
+information data up to date.
+
+=== Compiled Zone Information Files
+
+The compiled form of the timezone information database has been
+documented in a series of RFCs. The latest of this writing is
+https://www.rfc-editor.org/rfc/rfc9636.html[RFC 9636], which documents
+the v4 format. The database files themselves are backwards compatible,
+which is an important property. A reader that only knows about v1 can
+still read a v2-v4 file and will get a limited amount of information
+with some caveats.
+
+These files all live `/usr/share/lib/zoneinfo` on illumos. Importantly,
+the fact that these files are compliant to the RFC is important. Other
+software such as golang will use the system files, but implement their
+own readers. This means that we cannot arbitrarily change the format of
+these files; however, within illumos itself, the only thing that should
+ever be parsing them is libc and zdump.
+
+== Updating tzcode tools
+
+When updating the tzcode, we focus first on the tools. This requires
+updating zic, zdump, and the related pieces. Here are basic properties
+for how to perform these updates. Note, we should always update zdump
+and zic together. We should not update them separately.
+
+* There is only one system copy of `private.h`, `tzfile.h`, `tzdir.h`,
+  and `version.h`. `tzfile.h` is found in `usr/src/head`. The rest of
+  these are found in `usr/src/cmd/zic`. Both the tools zic build and
+  zdump point to these copies. There should not be any duplicates in
+  tree.
+
+* Update the `TZVERSION` in `usr/src/cmd/zic/version.h` to refer to the
+  version of the upstream code. Do not change the path to reporting
+  bugs.
+
+* The upstream `zic.c` and `zdump.c` files should be able to be used
+  directly and copied in. The only difference we may need is an explicit
+  inclusion of `tzfile.h` in zdump.c due to the changes that we perform
+  to tzfile.h.
+
+* In the upstream `private.h` there is a section that begins with the
+  comment `Handy macros that are independent of tzfile implementation.`.
+  These macros are used by libc and a few other pieces. These should be
+  removed from `private.h` and placed in `tzfile.h` for the time being.
+  Otherwise this file can more or less be taken verbatim.
+
+* Manually diff what has changed in `tzfile.h` using a tool like
+  `vimdiff` or similar.
+
+The remaining portion after this is testing related. See the later
+section on testing in this document. Manual pages should generally not
+be taken verbatim, but changes should be merged in in a way that follows
+the existing consistency of illumos manual pages.
+
+Future work will evaluate changes required to libc and how those should
+be incorporated. In general, we expect those to be less frequent than
+updates to these files and recommend that that be on a more ad-hoc
+basis.
+
+Finally, it's worth noting that it generally is going to be worth
+updating the tzcode portions separately from the tzdata portions as that
+allows easier validation in both directions.
+
+== Unpackaging `tzfile.h`
+
+`tzfile.h` is meant to be a private file that describes how to parse a
+large degree of the database and related internal pieces that are
+shared. The file itself has a note that asks it not to be present in the
+system include directory. Today it lives in `usr/src/head` and has been
+incorrectly shipped for quite some time!
+
+While it's useful to have this file be in the proto area for building
+purposes, it should not be packaged and shipped out. We should remove
+this to continue to abide by the request to not copy it, which makes
+sense given it's all about internal implementation details.
+
+Concretely to validate this we will work with the community to perform
+larger packaging builds.
+
+== zic(8) and zdump(8) stability
+
+Currently zic(8) and zdump(8) are marked as committed interfaces. In
+general, we should consider that we are no longer maintaining these
+commands directly (nor where we ever) and should likely admit that they
+will follow upstream's stability, which generally is a stable interface
+except when something is marked as experimental.
+
+Here we propose that we update the language in the manual to reflect
+this. If there are breaking changes, we should carefully consider them
+and take care to minimize user impact.
+
+== Testing Time Zone Changes
+
+An important thing here is performing testing for changes. When changing
+the code, whether the tools or libc portions, we believe it's important
+to do the following:
+
+* Confirm that none of the contents of libzoneinfo have changed before
+  and after this change. They should only ever change if the data has
+  changed.
+
+* Confirm how old and new zdump parse the same data. Specifically this
+  is comparing for each time zone:
+** How does an old and new zdump print output from data compiled from
+the old zic.
+** Hows the old zdump against the old zic output compare to the data
+compiled from new zic and printed with a new zdump.
+
+* How does libc's internal reader state change. This will be less useful
+  when we're updating libc, but in all other cases it should be the same
+  for all time zones before and after absent a specific bug that is
+  being fixed.
+
+* Testing third-party readers such as `golang` to verify that they read
+  updated data correctly.
+
+To facilitate this, we propose the addition of a new test suite tz-tests
+that installs like the others into `/opt/tz-tests` with a package of
+`system/test/tztest`. Unlike other test suites there will be no default
+Runfile. These are mostly a series of utilities to help facilitate
+running and validating the above.
+
+For testing changes to the time zone data, the libzoneinfo related
+pieces of the above test suite will be useful. Otherwise, the most
+useful thing to do is to test several of the time change that are going
+on manually be manipulating the `TZ` environment variable and using
+date(1) or other utilities to print times in the future and past around
+the DST-like changes that are occurring in that zone.
+
+== Future Directions
+
+There is a large degree of future work that this IPD proposes that we
+should investigate. This is broken into a few different concrete pieces
+that can proceed in parallel.
+
+=== Version 2 TZif and Beyond
+
+Right now illumos libc only reads the TZif version 1 file format. This
+should be updated to cover versions two and beyond. As part of this, we
+should be able to at least in an LP64 environment represent and deal
+with 64-bit `time_t`. The question of what to do with 32-bit compilation
+environments is left to the broader discussion in
+https://github.com/illumos/ipd/blob/master/ipd/0014/README.md[IPD 14
+illumos and Y2038].
+
+As part of this, we also suggest that we go and audit the differences in
+the other logic around localtime. There will be a need to increase some
+of the macros in `tzfile.h` to match upstream as part of this, that have
+been held back for the first update as they are tied to later versions
+and libc logic.
+
+=== tzalloc(3C) and localtime_rz(3C) 
+
+While https://illumos.org/man/3C/localtime_r[localtime_r(3C)], 
+https://illumos.org/man/3C/ctime_r[ctime_r(3C)], and related utilities
+allow the information that is used to fill them out to be re-entrant,
+they do not allow for an arbitrary way to specify a time zone. To date,
+the only way of really changing the time zone for a process is to
+perform something like setting the `TZ` environment variable.
+
+To deal with portions of this NetBSD introduced a version of localtime
+and related functions that allows one to pass an opaque timezone
+structure. These structures are specifically allocated and freed and
+kept separate from the system time zone information and caches. This
+provides a useful way forward for most software that needs to make
+queries about timezone information and the allocation routine allows one
+to specifically specify a time zone in a string, allowing for this to be
+parsed much the same way the `TZ` environment variable is.
+
+The IANA code and NetBSD differ in where `const` is in a few signatures.
+The IANA code generally also makes it into glibc and other places, so
+that means we'll need to understand the lay of the land when we get to
+this and if there's a way to construct things compatibly with both. We
+defer any such selection until we get to such an implementation.
+Regardless, we believe this is a useful direction for the system to add
+features and we should consider adding this same NetBSD inspired set the
+same way that the IANA tools have.
+
+== Summary of Changes
+
+This summarizes the changes that we're proposing:
+
+* As part of updating to tzcode 2025a:
+** We will no longer ship `tzfile.h`.
+** We will update the stability statements in zic(8) and zdump(8).
+* We will create a new set of tools to aid testing.
+* We will adopt the proposed process for updating tzcode and tzdata.
+** The two should generally be updated in separate commits.
+** The existing tzdata process does not change.
+
+As future work we will:
+
+* Update libc to support TZif version 2+.
+* Explore support for the tzalloc and localtime_rz family of functions.

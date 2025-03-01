@@ -1,0 +1,575 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Joshua M. Clulow <josh@sysmgr.org>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 51 Extensible Boot Image Support
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+During boot, the operating system locates and mounts the root file system.
+Various properties have values set by the boot loader, and potentially by other
+early kernel code, that tell the system what type of file system and which
+devices to use.  The kernel `main()` function calls `vfs_mountroot()`, which
+performs the work of mounting the file system.  This represents something of a
+rubicon: before root is mounted, we have limited access to files and kernel
+modules, and no ability to start processes; afterwards, we have full access to
+the file system and are able to start init(8).
+
+The process by which the root file system is located and mounted has several
+challenges, including:
+
+* The process is inflexible.  It is difficult or impossible to adjust the way
+  it works without modifying the code and rebuilding **unix**.  To enable
+  distribution-specific behaviour, the kernel must be forked and modified.
+
+* The process is somewhat opaque and underdocumented, and in many cases it is
+  not clear what stability various properties have.
+
+This IPD outlines some improvements we can make to allow distributions to
+better customise the process of locating and mounting root file systems in ways
+that meet their specific needs.  It also aims to specifically enable the use of
+a ZFS-based ramdisk in place of UFS.
+
+== Background
+
+There are two broad modes in which root file systems are mounted today:
+
+* An installed system has a **boot archive**, which is generally a **cpio(1)**
+  archive containing a limited subset of drivers and kernel modules, and any
+  configuration from `/etc` that is required to mount the root file system.
+  The boot archive is maintained by **bootadm(8)**, and is effectively a cache
+  of files from the real root file system.
+
+  The boot loader loads the boot archive into RAM and passes it to the kernel
+  (**unix**), which contains code to locate relevant modules (e.g.,
+  **nvme(4D)** and zfs(4FS)**) from the archive.  The kernel then mounts the
+  root file system device using those modules and that configuration, and the
+  boot archive is discarded.
+
+  In this mode, the system can boot from essentially any file system, provided
+  that the system firmware and the boot loader can locate the kernel and the
+  boot archive: the kernel can depend on regular modules to do the work.
+
+* A ramdisk or "live" system, where there is no mutable root disk.  Instead of
+  a boot archive, the boot loader provides the kernel an entire root file
+  system which is stored in memory and mounted in place.  When the system is
+  turned off or rebooted, the contents of this file system are lost along with
+  the rest of system memory.  This mode is used by bootable install media
+  (e.g., a CD-ROM or USB flash device) and by systems that have an appliance
+  flavour (e.g., SmartOS).
+
+  As there is no boot archive, kernel modules and configuration files must be
+  loaded directly from this root file system image.  This requires **unix** to
+  understand, at least in some limited way, the contents of the file system in
+  use.  In practice, this means bootable ramdisk images need to use UFS, rather
+  than an alternative like ZFS.
+
+== Improvements
+
+=== Interposing on root file system location without code modification
+
+To allow a more flexible approach to boot, we need to be able to inject new
+behaviour into the system prior to the call to `vfs_mountroot()`.  It should be
+possible to change this behaviour without editing and recompiling the core
+**unix** module.  It should also be possible to implement support for new
+formats and facilities, such as compression algorithms, in modules rather than
+directly in **unix**.
+
+To this end, we should introduce a new kind of miscellaneous module: a **boot
+image operations** module.  Such a module would provide a versioned operations
+vector with a committed name, like `_boot_image_ops`, with a layout like this:
+
+....
+typedef struct boot_image_ops {
+        uint32_t bimo_version;
+        void (*bimo_locate)(void);
+} boot_image_ops_t;
+....
+
+A module would look roughly like this:
+
+....
+#include <sys/boot_image_ops.h>
+
+/*
+ * Linkage structures
+ */
+static struct modlmisc custom_boot_modlmisc = {
+        .misc_modops =                          &mod_miscops,
+        .misc_linkinfo =                        "custom_boot",
+};
+
+static struct modlinkage custom_boot_modlinkage = {
+        .ml_rev =                               MODREV_1,
+        .ml_linkage =                           { &custom_boot_modlmisc, NULL },
+};
+
+int
+_init(void)
+{
+        return (mod_install(&custom_boot_modlinkage));
+}
+
+int
+_fini(void)
+{
+        return (mod_remove(&custom_boot_modlinkage));
+}
+
+int
+_info(struct modinfo *mi)
+{
+        return (mod_info(&custom_boot_modlinkage, mi));
+}
+
+static void
+custom_boot_locate(void)
+{
+        /*
+         * Custom code to implement boot image location logic, just prior
+         * to vfs_mountroot(), would go here.
+         */
+}
+
+boot_image_ops_t _boot_image_ops = {
+        .bimo_version =                         BOOT_IMAGE_OPS_VERSION,
+        .bimo_locate =                          custom_boot_locate,
+};
+....
+
+A new boot property, **boot-image-ops**, would accept the name of a module to
+load and treat as the boot image operations module; e.g., the module above
+might be installed as `/kernel/misc/amd64/custom_boot`, and providing a
+**boot-image-ops** value of **misc/custom_boot** would tell the kernel to load
+and execute the `custom_boot_locate()` routine just prior to calling
+`vfs_mountroot()`.
+
+The **bimo_locate()** entrypoint is infallible; implementers should call
+**panic(9F)** if they are unable to proceed.  This is the same as what
+**vfs_mountroot()** will do if the root file system cannot be mounted.
+
+The locate entrypoint can set properties via DDI routines; e.g.,
+**ddi_prop_update_string(9F)**.  To tell the kernel what kind of file system to
+expect, the **fstype** property can be set to the name of a file system driver.
+Simple file systems may use the generic **bootpath** property to specify the
+target device.  For example, to replicate the current default behaviour when
+these properties are not provided (see `uts/i86pc/conf/confunix.c`,
+**getrootfs()**, etc):
+
+....
+        (void) ddi_prop_update_string(DDI_DEV_T_NONE,
+            ddi_root_node(), "fstype", "ufs");
+        (void) ddi_prop_update_string(DDI_DEV_T_NONE,
+            ddi_root_node(), "bootpath", "/ramdisk:a");
+....
+
+An initial implementation of the boot operations module mechanism
+https://code.illumos.org/c/illumos-gate/+/4093[has been posted to Gerrit for
+review], based on code currently shipping in production versions of Oxide
+Helios.
+
+=== Custom ramdisks
+
+In the existing ramdisk boot mode, the boot loader provides the ramdisk image
+in place of the boot archive.  The pages of physical memory are left in place
+and mapped as a special ramdisk with the same size as the loaded image.  This
+has an unfortunate side effect: in order to increase the size of the resultant
+root file system, even just to leave some amount of free space so that the
+system can function correctly during and after boot, the actual image must be
+larger.  Processing of the image prior to mounting it is also not possible;
+e.g., decompressing or resizing the image.
+
+The **ramdisk(4D)** driver is able to create more than one ramdisk device, and
+able to choose a size at creation time.  The **ramdiskadm(8)** command allows
+the operator to create such devices after boot has completed.  This command
+ultimately makes **ioctl(2)** calls to the driver, though, and we can also do
+that from inside the kernel!
+
+It's possible to open the **ramdisk(4D)** control device and create a ramdisk
+using the layered driver interface (LDI): see **ldi_open_by_name(9F)**, etc).
+Once the device is configured, regular I/O to the device can populate it with
+any contents; e.g.,
+
+....
+        int r;
+        ldi_ident_t li;
+        ldi_handle_t ctlh = NULL, rdh = NULL;
+
+        /*
+         * Open the control device:
+         */
+        if (ldi_ident_from_mod(&custom_boot_modlinkage, &li) != 0) {
+                panic("could not get LDI identity");
+        }
+
+        if ((r = ldi_open_by_name("/devices/pseudo/ramdisk@1024:ctl",
+            FEXCL | FREAD | FWRITE, kcred, &ctlh, li)) != 0) {
+                panic("could not open ramdisk control device");
+        }
+
+        /*
+         * Create a 1GB ramdisk:
+         */
+        struct rd_ioctl ri;
+        bzero(&ri, sizeof (ri));
+        (void) snprintf(ri.ri_name, sizeof (ri.ri_name), "mydisk");
+        ri.ri_size = 1024 * 1024 * 1024;
+
+        if ((r = ldi_ioctl(ctlh, RD_CREATE_DISK, (intptr_t)&ri,
+            FWRITE | FKIOCTL, kcred, NULL)) != 0) {
+                panic("ramdisk creation failure");
+        }
+
+        VERIFY0(ldi_close(ctlh, FEXCL | FREAD | FWRITE, kcred)));
+
+        /*
+         * Open the ramdisk:
+         */
+        char *path = "/devices/pseudo/ramdisk@1024:mydisk";
+        if ((r = ldi_open_by_name(path, FREAD | FWRITE, kcred, &rdh,
+            li)) != 0) {
+                panic("could not open ramdisk");
+        }
+
+        /*
+         * Write a block to the ramdisk:
+         */
+        char *some_disk_bytes = { ... };
+        iovec_t iov = {
+                .iov_base = (caddr_t)some_disk_bytes,
+                .iov_len = 512,
+        };
+        uio_t uio = {
+                .uio_iovcnt = 1,
+                .uio_iov = &iov,
+                .uio_loffset = 0,
+                .uio_segflg = UIO_SYSSPACE,
+                .uio_resid = 512,
+        };
+
+        if ((r = ldi_write(rdh, &uio, kcred)) != 0) {
+                panic("could not write to ramdisk");
+        }
+....
+
+Note that the **RD_CREATE_DISK** ioctl is not currently documented or
+Committed.  We could investigate making this stable, or we could also look at
+providing a first class in-kernel interface for ramdisk creation and boot image
+operations modules could then just depend on the **ramdisk(4D)** module to get
+access to them.
+
+By allowing the ramdisk to be separate from the physical pages provided by the
+boot loader, we can allow the image to be decompressed or otherwise transformed
+as it is loaded.  We can then discard the original pages and make them available
+for other uses.  We can also allow for a larger ramdisk to make space for
+system operation, without inflating the ramdisk image itself; e.g., a ZFS image
+might be 200MB on disk, but could be unpacked into a 4GB ramdisk and then
+expanded to make use of the extra space.
+
+=== Simplified import of single-device ZFS root pools
+
+On **i86pc** systems, the BIOS/EFI system firmware and the operating system do
+not use the same scheme for naming disk devices.  It can be quite challenging
+for the kernel to locate the specific boot device that was used by the firmware
+and the boot loader to boot the system.
+
+To work around this, the loader has a contract of sorts with the kernel to
+provide several properties that ZFS can use to import the root pool:
+
+* **bootpath** provides the `/devices` path of the root disk.  This is
+  cached in the ZFS pool configuration as **phys_path**, stored by a previous
+  boot of the system.
+* **diskdevid** provides the devid of the root disk, in a form suitable
+  to pass to **ddi_devid_str_decode(9F)**.  This is cached in the ZFS pool
+  configuration as `"devid"`, stored by a previous boot of the system.
+* **zfs-bootfs** provides the name of the dataset used for `/`, which allows
+  the operator to override which boot environment is in use via a boot loader
+  menu.
+
+In some contexts, the `/devices` path may change; e.g., if you create a
+bootable ZFS image on one system, and deploy it on another system.  When this
+occurs, the cached values are invalid and the operating system cannot use them
+to locate the pool.  As such, two additional properties were added as part of
+an earlier change, https://www.illumos.org/issues/7119[7119 boot should handle
+change in physical path to ZFS root devices]:
+
+* **zfs-bootpool** contains the pool-level GUID for the ZFS root pool.
+* **zfs-bootvdev** contains the vdev-level GUID for the specific device within
+  the root pool that the system firmware and the boot loader used.
+
+These properties allow the system to scan visible disk devices in the event
+that the cached names appear to be invalid, looking for a valid ZFS pool with
+match identifiers.
+
+In the case of booting from a custom ramdisk, it is even easier to determine
+where the root pool is located, because the boot image operations module
+created the device.  In order to simplify telling ZFS exactly which device
+to use by `/devices` path, a new property is added to the system:
+
+* **zfs-rootdisk-path** allows a boot operations module to override all other
+  behaviours and import a pool directly from a given `/devices` path.
+
+This enabling work has actually already landed, as
+https://www.illumos.org/issues/15137[15137 ZFS should allow direct import of a
+root pool from a /devices path].
+
+== Case Studies
+
+=== Oxide Helios
+
+Oxide Computer Company maintains the Helios distribution of illumos.  This
+distribution runs on a variety of systems, including on engineering desktops
+and virtual machines (using the **i86pc** architecture), as well as on
+custom-made Oxide servers (using the **oxide** architecture).
+
+On **i86pc** machines, the system is installed to disk in the classic fashion,
+in essentially the same way that OmniOS or OpenIndiana work today.  These
+systems use BIOS or EFI firmware and the illumos boot loader.
+
+On **oxide** systems, the system operates from an appliance style ramdisk and
+the boot architecture is somewhat different to classic PC systems:
+
+* Every **oxide** system has a Service Processor (SP), which is somewhat
+  analogous to a Baseboard Management Controller (BMC).  The SP allows the
+  control plane to write a boot image into a small NOR flash chip (~32MB).
+
+* When powered on, the host CPU loads a boot image from the NOR flash into
+  main memory.  On an **i86pc** system, this would contain the BIOS/EFI
+  firmware.  On **oxide**, it contains our custom boot loader (**phbl**),
+  the **unix** kernel, and a compressed **cpio** boot archive.  The boot
+  archive is essentially the same as the one that an installed disk system
+  would produce via **bootadm(8)**, but with a much smaller set of modules.
+
+* The **oxide**-specific **unix** kernel performs initialisation that would
+  be performed by the BIOS/EFI firmware on a PC, and then we include an
+  Oxide-specific **boot image operations** module to locate and load the
+  ramdisk that matches the kernel and boot archive in the NOR flash.
+
+* The Oxide boot module can source images from one of three places:
++
+--
+* Using a custom Ethernet protocol to engage with a boot server over a copper
+  network interface to a lab network.
+* Using an internal NVMe device, where the ramdisk image has previously been
+  stored in a slice.
+* Using an internal serial link with the SP, allowing a recovery image to be
+  provided autonomously over the management network in an Oxide Rack.
+--
++
+Each image has an Oxide-specific header that contains information about the
+name and checksum of the image, which must match those stored in the NOR flash.
+It also has flags to describe compression algorithms in use, if any, and the
+target size of the unpacked ramdisk (which can be larger than the image
+itself).  The rest of the image is a ZFS file system.
+
+* Once the boot module locates and unpacks the image into a custom ramdisk of
+  appropriate size, the boot properties (e.g., **fstype** and
+  **zfs-rootdisk-path**) are updated and control returns to the kernel.  The
+  kernel mounts ramdisk as a root ZFS pool, much as it would from any other
+  root disk, and boot proceeds in the usual way from that point onwards.
+
+By providing the custom loading behaviour in this way, the Oxide-specific
+behaviour can be contained within modules that do not need to live in
+illumos-gate.  The behaviour is also sufficiently flexible that Helios has one
+set of binary packages that can be installed or configure on PCs as well as on
+Oxide systems, without needing to rebuild anything.  The code for each style of
+booting can be installed and configured only on the systems where it is
+required.
+
+=== SmartOS
+
+This case study is currently hypothetical, but is included because it was a
+central design consideration for the boot image operations module architecture.
+Today, SmartOS systems boot using the UFS ramdisk mode.  This appliance style
+mode provides several benefits, including a robust mode of deployment on a
+large fleet of systems, and a resistance to configuration drift over time.  The
+ramdisk image is loaded either by the illumos boot loader from a local disk of
+some kind, or over the network using iPXE.
+
+In order to fit a full and useful system image into as small a ramdisk image as
+is possible, the SmartOS image has two layers:
+
+* The base UFS ramdisk that the system boots becomes a read-write root file
+  system, with a small amount of free space for working state.
+* The bulk of the space in the ramdisk image is taken by a compressed
+  **lofi(4D)** image that is mounted read-only at `/usr` by an SMF service.
+  The construction of this split-`/usr` system is somewhat complex, and can
+  require the duplication of some files "under" the eventual `/usr` mount in
+  order to enable the `/usr` file system to be mounted in the first place.
+
+In order to move to a ZFS-based ramdisk, the Oxide boot approach can be adapted
+to fit:
+
+* During SmartOS platform image build, instead of producing `/usr` and root
+  UFS images, the build would be adapted to produce a single ZFS pool image.
+  This image might enable ZFS-level compression of some kind.  The pool image
+  could be sized to almost exactly fit around the files contained in the image,
+  without leaving additional space for system operation.
+* Once the ZFS image is constructed, a **cpio** boot archive would be
+  constructed.  The files contained in this archive would be a limited subset
+  of the kernel modules and configuration files that would be included by
+  **bootadm(8)** in a standard boot archive.
+
+  Because the system firmware and the existing boot loader would load both the
+  boot archive and the ramdisk image into memory as multiboot modules, only
+  kernel modules that are used prior to `vfs_mountroot()` would need to be
+  included; e.g., **ramdisk** and **zfs**, any dependencies like compression
+  modules, and any configuration files like **/etc/driver_aliases**.  Using a
+  simple format like cpio for this archive allows us to avoid having a second
+  partially functional implementation of more complex file systems like ZFS.
+* The ISO or USB boot media would be constructed to include:
++
+--
+* **unix**, the kernel
+* the **cpio** format boot archive
+* the ZFS ramdisk image
+--
++
+  When using iPXE, the same set of artefacts would be loaded via HTTP, much as
+  the UFS ramdisk image is today.  In addition to the artefacts, the boot
+  loader would set **boot-image-ops** to **misc/smartos_boot**, specifying a
+  custom boot image operations module.
+* The **smartos_boot** module would create a custom ramdisk of an
+  appropriate size based on some algorithm, e.g.,
++
+--
+* a hard-coded size deemed appropriate for all systems; e.g., 1GB.
+* a calculated fraction of the total memory size of the system, with a cap;
+  e.g., 25% of physical memory, with a maximum absolute size of 2GB.
+* calculated based on the size of the loaded ramdisk image; e.g., twice the
+  size of the image.
+* overridden by a boot property, allowing Triton or the operator to choose
+  the size based on other knowledge or policy.
+  image size, or even overridden by a boot property.  
+--
++
+* The image would be unpacked into the ramdisk.  Unpacking could involve
+  whatever transformations and checks are required to meet the goals of
+  SmartOS and Triton; e.g.,
++
+--
+* decompression of the image (e.g., gzip or bzip2), which can substantially
+  reduce the load time for the image over the network or from USB
+* storing measurements (e.g., hash values) of the ramdisk image for audit
+  purposes
+* verifying the integrity of the image against a content hash (e.g., SHA-256)
+* verifying a cryptographic signature of the image to confirm the image was
+  produced by MNX
+--
++
+* Once unpacked and verified, the boot module would set the properties required
+  to get the system to boot from the ramdisk:
++
+--
+* **fstype** would be set to **zfs**
+* **zfs-bootfs** would be set to the name of the root dataset in the pool
+* **zfs-rootdisk-path** would be set to the `/devices` path of the ramdisk
+--
++
+  Control would then return to the kernel and boot would continue in the usual
+  way.
+
+Depending on goals and requirements for the SmartOS project, there are a lot of
+options for distribution-specific adjustments to the plan.  For example, the
+plan above requires the boot loader to pass _three_ artefacts to the kernel.
+If there is a need to only pass _two_ artefacts (a kernel and a boot archive)
+then the third artefact, the ZFS image, could actually be stored as a regular
+file inside the **cpio** formatted boot archive.  The **smartos_boot** module
+would be able to open and access the file using `kobj_open()` and
+`kobj_read()`.
+
+The boot operations module interface allows SmartOS (and any distribution) to
+make their own choices about the format of their ramdisk images (ZFS or
+otherwise).
+
+== Potential Alternatives
+
+=== Linux initramfs-style booting
+
+Many Linux systems boot from an **initial RAM file system** (**initramfs**),
+which is somewhat analogous to our boot archive.  A key difference in
+architecture is that the initramfs frequently contains user mode programs as
+well as kernel modules.  The programs included in the image have one job: to
+locate and mount the _actual_ root file system, potentially by interacting with
+the user, and then using the Linux-specific **pivot_root(2)** system call to
+atomically switch the initramfs and the real root file system.  Control then
+passes to the software on the real root file system and the initramfs is
+unmounted and discarded.
+
+It is tempting to think that we could employ something simlar, but there are
+a number of architectural differences in our operating system that would make
+this challenging:
+
+* We ship a whole operating system, not just a kernel.  Many pieces of
+  important functionality are built as commands, libraries, and daemons, rather
+  than being a part of the kernel.
+* Various critical facilities are provided by SMF-managed services.
+* We make no guarantees about system calls, or many other interfaces.  Reduced
+  functionality static binaries (like busybox) cannot usefully be built for
+  this purpose.  Quite a lot of the actual system would need to come along for
+  the ride in what is supposed to be a minimal boot archive.
+
+=== Adding a second implementation of ZFS to the kernel
+
+We could potentially include a partial, read-only implementation of ZFS in
+**unix**.  This would mirror the minimal implementations of cpio, ISO, and
+UFS formats that we have today.  The kernel could then read files directly
+out of the ramdisk image instead of needing a separate cpio boot archive.
+
+While directly reading the ramdisk file system image is attractive in
+some ways, in practice there are a number of issues with this approach:
+
+* We would be taking on the burden of maintaining a second implementation
+  of ZFS, written in C.  Any work done on the primary ZFS module may need to
+  be added to the early boot version as well.  This is also a lot of complex
+  new code to write, review, and test, just to get started.
+* A second, reduced implementation is unlikely to be able to support all new
+  ZFS pool features, or even the complete set of _current_ features.
+* A lot of code that is currently shipped in modules (e.g., compression
+  algorithms), as is our general preference, would need to be built directly
+  into **unix**.
+
+The use of ZFS over UFS in Oxide Helios, and presumably soon SmartOS, is
+expedient and worthwhile for now.  It's more modern and flexible than UFS, and
+it helps solve the 2038 problem.  In the limit, it's not a perfect fit for the
+task at hand:
+
+* Physical disks require all of the complexity of ZFS, the ZIO pipeline,
+  transactional writes, and integrity checksums, in order to provide strong
+  durability guarantees.  An ephemeral ramdisk has very different properties;
+  we assume that main memory does not require checksumming, and if the system
+  crashes the ramdisk contents is purposefully lost.
+* The ARC offers good performance characteristics for secondary storage, but
+  ramdisk data is already in system memory.  There is some amount of double
+  caching that occurs in this model, especially if compression is used in the
+  ZFS pool.  A file system like **tmpfs** does not have the same property:
+  the pages where the data is stored can just be wired into the file system
+  cache without duplication.
+* ZFS is still fundamentally a file system targetting block devices.  The
+  ramdisk has to have a particular concrete size of contiguous LBAs.  A
+  first class in-memory file system like **tmpfs** does not require this
+  level of skeuomorphism; the backing store can just be kernel-allocated
+  memory, growing and shrinking precisely based on the actual size of the
+  stored data.

@@ -61,17 +61,16 @@ There are two broad modes in which root file systems are mounted today:
   configuration from `/etc` that is required to mount the root file system.
   The boot archive is maintained by **bootadm(8)**, and is effectively a cache
   of files from the real root file system.
-
-  The boot loader loads the boot archive into RAM and passes it to the kernel
-  (**unix**), which contains code to locate relevant modules (e.g.,
-  **nvme(4D)** and zfs(4FS)**) from the archive.  The kernel then mounts the
-  root file system device using those modules and that configuration, and the
-  boot archive is discarded.
-
-  In this mode, the system can boot from essentially any file system, provided
-  that the system firmware and the boot loader can locate the kernel and the
-  boot archive: the kernel can depend on regular modules to do the work.
-
++
+The boot loader loads the boot archive into RAM and passes it to the kernel
+(**unix**), which contains code to locate relevant modules (e.g., **nvme(4D)**
+and zfs(4FS)**) from the archive.  The kernel then mounts the root file system
+device using those modules and that configuration, and the boot archive is
+discarded.
++
+In this mode, the system can boot from essentially any file system, provided
+that the system firmware and the boot loader can locate the kernel and the boot
+archive: the kernel can depend on regular modules to do the work.
 * A ramdisk or "live" system, where there is no mutable root disk.  Instead of
   a boot archive, the boot loader provides the kernel an entire root file
   system which is stored in memory and mounted in place.  When the system is
@@ -79,12 +78,12 @@ There are two broad modes in which root file systems are mounted today:
   the rest of system memory.  This mode is used by bootable install media
   (e.g., a CD-ROM or USB flash device) and by systems that have an appliance
   flavour (e.g., SmartOS).
-
-  As there is no boot archive, kernel modules and configuration files must be
-  loaded directly from this root file system image.  This requires **unix** to
-  understand, at least in some limited way, the contents of the file system in
-  use.  In practice, this means bootable ramdisk images need to use UFS, rather
-  than an alternative like ZFS.
++
+As there is no boot archive, kernel modules and configuration files must be
+loaded directly from this root file system image.  This requires **unix** to
+understand, at least in some limited way, the contents of the file system in
+use.  In practice, this means bootable ramdisk images need to use UFS, rather
+than an alternative like ZFS.
 
 == Improvements
 
@@ -103,8 +102,8 @@ vector with a committed name, like `_boot_image_ops`, with a layout like this:
 
 ....
 typedef struct boot_image_ops {
-        uint32_t bimo_version;
-        void (*bimo_locate)(void);
+        uint32_t                bimo_version;
+        void                    (*bimo_locate)(void);
 } boot_image_ops_t;
 ....
 
@@ -117,13 +116,13 @@ A module would look roughly like this:
  * Linkage structures
  */
 static struct modlmisc custom_boot_modlmisc = {
-        .misc_modops =                          &mod_miscops,
-        .misc_linkinfo =                        "custom_boot",
+        .misc_modops =          &mod_miscops,
+        .misc_linkinfo =        "custom_boot",
 };
 
 static struct modlinkage custom_boot_modlinkage = {
-        .ml_rev =                               MODREV_1,
-        .ml_linkage =                           { &custom_boot_modlmisc, NULL },
+        .ml_rev =               MODREV_1,
+        .ml_linkage =           { &custom_boot_modlmisc, NULL },
 };
 
 int
@@ -154,8 +153,8 @@ custom_boot_locate(void)
 }
 
 boot_image_ops_t _boot_image_ops = {
-        .bimo_version =                         BOOT_IMAGE_OPS_VERSION,
-        .bimo_locate =                          custom_boot_locate,
+        .bimo_version =         BOOT_IMAGE_OPS_VERSION,
+        .bimo_locate =          custom_boot_locate,
 };
 ....
 
@@ -438,7 +437,7 @@ boot archive and the ramdisk image into memory as multiboot modules, only
 kernel modules that are used prior to `vfs_mountroot()` would need to be
 included; e.g., **ramdisk** and **zfs**, any dependencies like compression
 modules, and any configuration files like **/etc/driver_aliases**.  Using a
-simple format like cpio for this archive allows us to avoid having a second
+simple format like **cpio** for this archive allows us to avoid having a second
 partially functional implementation of more complex file systems like ZFS.
 * The ISO or USB boot media would be constructed to include:
 +

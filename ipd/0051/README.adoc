@@ -2,7 +2,7 @@
 :toc: left
 :numbered:
 :icons: font
-:state: predraft
+:state: draft
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor:

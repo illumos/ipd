@@ -1,0 +1,119 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: iximeow <illumos@iximeow.net>
+:sponsor:
+
+= IPD 50 Retiring `fipe(4D)`
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+The `fipe(4D)` driver provides some power-saving functionality on
+particular systems with "Fully Buffered DIMM" modules. Specifically,
+systems with a North Bridge chipset with vendor ID 8086 and device ID
+1A38 or 360B. In product name terms, these are the Intel 5000 and 7300
+series chipsets, used in Intel motherboards supporting Xeon processors
+of similar models (5000 series, 7000 series, including the later Core
+variants with similar model numbers and L/E/X prefixes)
+
+While the NetBurst cores predate x86-64 by just a bit, it seems these
+Xeon models are all Prescott or later, putting these at some of the
+oldest still-supported x86-64 processors.
+
+`fipe(4D)` was integrated in commit `eca2601c`, from
+https://illumos.org/opensolaris/ARChive/PSARC/2009/289/index.html[PSARC/2009/289]
+"FBDIMM Idle Power Enhancement (FIPE) driver".
+
+On source review, I think wakeups at inopportune times can cause
+`fipe(4D)` to idle just as a system has become busy, and it is the sole
+motivator for additional complication to i86pc power management for all
+x86 systems.
+
+`fipe(4D)` was the sole outside-the-kernel user of the CPU Idle
+Notification framework added with
+https://illumos.org/opensolaris/ARChive/PSARC/2009/115/index.html[PASRC/2009/115].
+The notification framework itself is fine - it's also used for lazy TLB
+flushing and DTrace probes around CPU idle and wake - but the
+`check_func` and its argument are provided and subsequently ignored by
+both default callbacks, and only used by `fipe`. So, without `fipe` we
+could simplify the interface to CPU idle notifications, making
+`usr/src/uts/i86pc/os/cpupm/cpu_idle.c` more obviously correct for all
+systems.
+
+This IPD proposes:
+
+* Removing `usr/src/uts/i86pc/io/fipe`, as well as its header and
+  Makefile rules
+* Marking the `fipe` package `obsolete`
+
+And with `fipe(4D)` retired, a followup change to:
+* Remove the `check_func` and `check_arg` parameters to
+  `cpu_idle_enter`
+* Remove the `acpi_cpu{_mwait_ipi,_mwait,}_check_wakeup` functions
+* Cleanup as appropriate around `cpu_idle.c`.
+
+Behavioral changes will only be seen on Xeon systems with chipsets
+`fipe` supported, as named above, and the behavioral change will be
+higher idle power consumption and heat. Those systems should otherwise
+work as well as before, and notably should see no change under load.
+
+== Background
+
+`fipe(4D)` was integrated back when it seemed that FB-DIMM might be the
+future of memory architecture. As history would have it, though, the
+industry moved towards DDR3 and registered DIMMs, rather than FB-DIMM
+and the corresponding "Advanced Memory Buffer" (AMB) modules to
+communicate with them.
+
+I'm fuzzy on many of the details here, but it seems that the AMB itself
+was a substantial additional power draw and heat producer. FIPE seems to
+be a feature on corresponding chipsets to power off some parts of the
+DIMM while memory is unused, reducing idle power and heat some.
+
+The check functions added with the CPU Idle Notification framework which
+`fipe(4D)` builds on, though, are (perhaps surprisingly) stateful: they
+may enable and disable interrupts, and may register that a CPU has
+exited idle if an interrupt was processed.
+
+`fipe(4D)` is the only caller of these check functions, and calls them
+only after checking that when the current CPU is idled, all CPUs will be
+idle. From source review, I believe that if a CPU wakes between this
+point and actually idling, for example in handling a NIC interrupt,
+`fipe(4D)` will still incorrectly take operations to reduce FBDIMM power
+use. This is another point where documentation and effect are hard to
+track down: would the system actually idle? Will the idle attempt be a
+no-op? Will something else happen?
+
+In the best case, it would be great to document, or test, or at least
+file issues to follow up here. But recognizing that the memory design
+was removed from product roadmaps almost 15 years ago, maybe that's more
+effort than is appropriate.
+
+== Implementation
+
+With much appreciation to the original code, the implementation of this
+IPD would mostly be reverting `PSARC/2009/289` in one change, then the
+callback-before-entering-CPU-idle changes in `PASRC/2009/115`.
+
+The commits no longer revert cleanly, and `PSARC/2009/115` in regards
+other than `check_func` still seems quite useful! This is a general
+statement of direction more than precise depiction of changes.
+
+We could, instead, refactor this driver and CPU idle notifications so
+that checking if a CPU can enter idle does not, itself, de-idle CPUs.
+This could come with additional documentation for `cpu_idle_enter` and
+the idle notification system should be used, or what invariants a
+`check_func` must uphold. This feels needlessly risky for the relevant
+systems though, since we would want to test changes on those systems at
+a miminum.

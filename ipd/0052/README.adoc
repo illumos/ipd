@@ -16,7 +16,7 @@ ifdef::env-github[]
 :warning-caption: :warning:
 endif::[]
 
-= IPD 51 Extensible Boot Image Support
+= IPD 52 Extensible Boot Image Support
 {authors}
 
 [cols="3"]
@@ -54,6 +54,8 @@ a ZFS-based ramdisk in place of UFS.
 
 == Background
 
+=== Mounting the root file system
+
 There are two broad modes in which root file systems are mounted today:
 
 * An installed system has a **boot archive**, which is generally a **cpio(1)**
@@ -84,6 +86,44 @@ loaded directly from this root file system image.  This requires **unix** to
 understand, at least in some limited way, the contents of the file system in
 use.  In practice, this means bootable ramdisk images need to use UFS, rather
 than an alternative like ZFS.
+
+=== Boot archives
+
+As described above, the boot archive allows our modular kernel to locate
+drivers and configuration files that are required in order to boot up to the
+point where we can mount the root file system.  The system supports several
+formats for boot archives:
+
+* UFS (**ufs(4FS)**) file systems
+* ISO 9660 (**hsfs(4FS)**) file systems
+* cpio archives
+
+The preferred boot archive format for modern systems is a **cpio** archive.
+These archives can be cheaply constructed or inspected with **cpio(1)**, a
+standard user mode tool.
+
+Though **cpio** archives are decidedly _not_ a file system image, it turns out
+that's actually fine!  Prior to mounting root, files are accessed via
+**kobj_open()** and **kobj_open_file()**.  These routines accept a fully
+qualified UNIX path as a string, and use it to hunt through the archive looking
+for a match.  At this early boot point, the system does not need to care about
+directories or file system permissions: the archive effectively represents a
+key-value store.
+
+While we generally expect that keys in this store will match up to files that
+appear in the eventually mounted root file system, this is not actually a hard
+requirement.  Given the early boot context in which this store is used, we
+should generally prefer the simplest possible format that can map path strings
+(keys) to file contents, as an array of bytes (values).
+
+The existing UFS ramdisk model essentially conflates the role of the boot
+archive and the role of the root file system image.  This has been possible
+because UFS has a relatively simple on-disk format which has been relatively
+static for decades.  It's important to recognise that this is not a general
+result of the architecture, but rather a special case.  In general, it should
+be possible to support a wide variety of image formats and root file systems
+without modifying **unix**, by keeping the concerns of boot archives and
+the concerns of root file system images separate.
 
 == Improvements
 
@@ -164,6 +204,13 @@ might be installed as `/kernel/misc/amd64/custom_boot`, and providing a
 **boot-image-ops** value of **misc/custom_boot** would tell the kernel to load
 and execute the `custom_boot_locate()` routine just prior to calling
 `vfs_mountroot()`.
+
+In addition to the boot property, a global static string **boot_image_ops**
+will allow the boot image operations module to be specified via **system(5)**.
+This will enable the construction of a boot archive that correctly uses a boot
+image operations module without the need to amend the boot properties provided
+by an existing PXE server.  If a module is specified via both the boot property
+and the **system(5)** tuneable, the boot property will take precedence.
 
 The **bimo_locate()** entrypoint is infallible; implementers should call
 **panic(9F)** if they are unable to proceed.  This is the same as what

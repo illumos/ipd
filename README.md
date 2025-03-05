@@ -63,7 +63,7 @@ information is available at the end of this document.
 | published | [IPD 49 Advancing the C Standard in illumos](./ipd/0049/README.adoc)
 | predraft | [IPD 50 ZFS Maintenance and Consumption of OpenZFS Technology](./ipd/0050/README.adoc)
 | draft    | [IPD 51 Time Zone Information Maintenance](./ipd/0051/README.adoc)
-| predraft | [IPD 52 Extensible Boot Image Support](./ipd/0052/README.adoc)
+| draft    | [IPD 52 Extensible Boot Image Support](./ipd/0052/README.adoc)
 | draft    | [IPD 53 Retiring `fipe(4D)`](./ipd/0053/README.adoc)
 
 ## Contributing

@@ -142,8 +142,9 @@ vector with a committed name, like `_boot_image_ops`, with a layout like this:
 
 ....
 typedef struct boot_image_ops {
-        uint32_t                bimo_version;
+        uint64_t                bimo_version;
         void                    (*bimo_locate)(void);
+        void                    (*bimo_populate)(void);
 } boot_image_ops_t;
 ....
 
@@ -188,13 +189,26 @@ custom_boot_locate(void)
 {
         /*
          * Custom code to implement boot image location logic, just prior
-         * to vfs_mountroot(), would go here.
+         * to vfs_mountroot(), would go here.  This entrypoint is able to
+         * choose which file system to use.
+         */
+}
+
+static void
+custom_boot_populate(void)
+{
+        /*
+         * Custom code that runs right after the root file system is mounted
+         * as per earlier direction from the locate routine.  This routine
+         * is called prior to discarding the boot archive and making the root
+         * file system visible to the rest of the system.
          */
 }
 
 boot_image_ops_t _boot_image_ops = {
         .bimo_version =         BOOT_IMAGE_OPS_VERSION,
         .bimo_locate =          custom_boot_locate,
+        .bimo_populate =        custom_boot_populate,
 };
 ....
 
@@ -203,7 +217,9 @@ load and treat as the boot image operations module; e.g., the module above
 might be installed as `/kernel/misc/amd64/custom_boot`, and providing a
 **boot-image-ops** value of **misc/custom_boot** would tell the kernel to load
 and execute the `custom_boot_locate()` routine just prior to calling
-`vfs_mountroot()`.
+`vfs_mountroot()`, and `custom_boot_populate()` immediately after.  Both
+entrypoints are optional, so a particular boot image operations module can
+choose to provide either or both.
 
 In addition to the boot property, a global static string **boot_image_ops**
 will allow the boot image operations module to be specified via **system(5)**.
@@ -230,6 +246,14 @@ these properties are not provided (see `uts/i86pc/conf/confunix.c`,
         (void) ddi_prop_update_string(DDI_DEV_T_NONE,
             ddi_root_node(), "bootpath", "/ramdisk:a");
 ....
+
+The populate entrypoint can manipulate the file system after it is mounted, but
+before it gets used by the rest of the system.  This entrypoint can be used to
+decouple the boot archive format from the chosen root file system: the boot
+archive (presumably **cpio**-formatted) contains _files_ rather than an image
+of a block device, and they could be individually unpacked into an empty file
+system of essentially any type, even one like **tmpfs(4FS)** that does not have
+an on-disk format at all.
 
 An initial implementation of the boot image operations module mechanism
 https://code.illumos.org/c/illumos-gate/+/4093[has been posted to Gerrit for
@@ -381,6 +405,24 @@ to use by `/devices` path, a new property is added to the system:
 This enabling work has actually already landed, as
 https://www.illumos.org/issues/15137[15137 ZFS should allow direct import of a
 root pool from a /devices path].
+
+=== Allowing **tmpfs(4FS)** to be a root file system
+
+At present, **tmpfs(4FS)** does not provide an implementation of the
+**VFS_MOUNTROOT** operation, and thus cannot be used as a root file system.
+Historically this has made perfect sense, as it has no on-disk representation
+and cannot thus be loaded from a ramdisk image or boot archive.
+
+With the addition of boot image operations modules, the **populate** entrypoint
+could be used to unpack a root file system into an empty **tmpfs** file system.
+As such, it makes sense now to extend **tmpfs** with a **VFS_MOUNTROOT**
+implementation.
+
+A draft implementation is currently
+https://code.illumos.org/c/illumos-gate/+/4134[posted to Gerrit].  It has been
+used to prototype an extremely limited demonstration of unpacking a boot
+archive into an empty **tmpfs** for use as the root file system, implemented as
+a boot image operations module.
 
 == Case Studies
 

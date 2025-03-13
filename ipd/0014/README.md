@@ -93,6 +93,7 @@ Known items with issues:
 
 * pam_smb_passwd
 * topo plugins
+* `vuid_event.h`'s `struct firm_event` uses `struct timeval32` even in LP64 environments. (It might, however, be used as a pre-hrtime_t interval timer; hard to say without further investigation.)
 
 ## Legacy applications
 

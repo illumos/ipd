@@ -56,6 +56,8 @@ are impacted. Such as:
 * NFS `nfs_allow_preepoch_time` tunable uses
 * Olson zic/zoneinfo needs updating to the "new" format (I think libc
   `localtime.c` talks about this)
+* illumos BPF has `struct bpf_timeval` which is an "on the wire" 32-bit
+  `struct timeval`-alike.
 
 ## Implementation
 

@@ -67,6 +67,12 @@ sometimes not been the case.
 
 `XXX KEBE SAYS INSERT ZFS CRYPTO TEXT HERE`
 
+[Possible jbk fix]https://github.com/jasonbking/illumos-gate/blob/zfs-crypto-dnode/usr/src/uts/common/fs/zfs/sys/dmu_objset.h#L70-L86
+
+
+`XXX KEBE SAYS INSERT ALEX-WILSON-INSPIRED COMPRESSED-ARC SITUATION`
+
+
 == Interoperability
 
 A possible concern for illumos ZFS is interoperability with OpenZFS and with
@@ -86,6 +92,27 @@ indicates that pool feature-flags are present, and should be examined.
 
 `XXX KEBE SAYS A LOT MORE NEEDS TO GO HERE... or is it its own IPD?`
 
+=== On illumos Consuming OpenZFS.
+
+```
+XXX KEBE SAYS this section was inspired by discussions with Toomas Soome,
+and will need further clarification and expansion.
+```
+
+IF illumos decides, ala FreeBSD, to completely consume a
+named-release[https://github.com/openzfs/zfs/releases] of OpenZFS, it would
+have to be a large-project integration, similar to, and larger in scope than,
+something like [NFS server in a
+zone.]https://github.com/illumos/ipd/blob/master/ipd/0011/README.md
+
+To that end, ANY experimentation with a pull of OpenZFS should be performed
+in a downstream repo from illumos-gate, and maybe if it is sufficiently
+stable, an `openzfs-X.Y` which appears to be the unit of tracking granularity
+among OpenZFS releases (2.1, 2.2, 2.3) may be the best way to differentiate
+the stable base illumos ZFS from any works-in-progress to bring in an OpenZFS
+release.  IF the illumos main/master branch accepts an OpenZFS release in the
+future, a similar process would ensue for any version increase in either of X
+or Y.
 
 == The illumos Policy for Consuming OpenZFS Technology
 

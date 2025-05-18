@@ -65,6 +65,7 @@ information is available at the end of this document.
 | published | [IPD 51 Time Zone Information Maintenance](./ipd/0051/README.adoc)
 | draft    | [IPD 52 Extensible Boot Image Support](./ipd/0052/README.adoc)
 | draft    | [IPD 53 Retiring `fipe(4D)`](./ipd/0053/README.adoc)
+| predraft  | [IPD 54 Upgrading Illumos system sqlite to version 3](./ipd/0054/README.md)
 
 ## Contributing
 

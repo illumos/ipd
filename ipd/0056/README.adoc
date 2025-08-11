@@ -1,0 +1,324 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Kyle Simpson <kyle@oxide.computer>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 56 – Supporting Tunnel-Aware Offloads
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+Modern NICs are able to perform stateless offloads on encapsulated packets, such as those sent within a Geneve <<rfc8926>> or VXLAN <<rfc7348>> frame.
+Typically this entails either walking past the full set of outer headers to compute inner checksums, or correctly replicating and fixing up all inner/outer headers preceding a TCP segment which must be subdivided to fit a link's MTU.
+Advertising these capabilities allows tunnel devices to, in turn, advertise standard checksum/segmentation offloads to the guests making use of them.
+This offers significant performance benefits to zones or to guests operating over network encapsulation, which are able to transmit large TCP segments over viona.
+
+illumos today lacks the infrastructure required to represent this concept.
+In response this IPD outlines the datapath changes necessary for network packets to request these offloads, and proposes the shape of a MAC provider interface which allows for NIC drivers to express:
+
+* which tunnel types are explicitly supported by a given device,
+* which inner offloads are supported per inner protocol,
+* which checksum offloads are simultaneously supported _on the outer headers_ (L3 and L4).
+
+This work is currently implemented alongside link:../0055/README.adoc[IPD 55] in stlouis/Helios commit https://github.com/oxidecomputer/illumos-gate/commit/53ed1e30b6807e5e9d694326390914e7c53c0c94[53ed1e30b6807e5e9d694326390914e7c53c0c94].
+The implementation above includes support in `cxgbe` for these offloads on compatible Chelsio network cards.
+As in IPD55, the linked commit does not establish any in-tree tunnel clients which make use of these offloads.
+We are instead using this machinery routinely via the https://github.com/oxidecomputer/opte:[OPTE kernel module] in production for all applicable traffic, and have done so for several releases now.
+
+To give an idea of performance benefits for upstream clients, we tested two zones on adjacent machines communicating over directly-connected Chelsio T6 cards, carried over Geneve encapsulation via OPTE.
+In this use case, the use of only tunneled LSO/CSO (no GRO) moves OPTE's TCP send rate from ~3.5 to ~5.2 Gbps at a 1500B MTU.
+Using this same feature to instead segment packets using a full 9kB MTU (reattaching a 1500B MTU/MSS on receipt) achieves ~16Gbps.
+
+Although inclusion of link:../0055/README.adoc[IPD 55] is by no means a necessity for these changes to be possible, it has significant use in eliding multiple attempts to parse far deeper header stacks (e.g., both during `mac_tx` and within the NIC driver).
+
+== Proposal
+
+=== MAC provider interface
+
+These capabilities are extensions to the existing `MAC_CAPAB_HCKSUM` and `MAC_CAPAB_LSO` queries which can be handled by a provider's `mc_getcapab` callback.
+We first define some shared types for use in these extensions:
+
+.usr/src/uts/common/sys/mac_provider.h
+[code,c]
+----
+/*
+ * Flagset of currently supported tunnel classes for tunneled CSO/LSO offload.
+ */
+#define MAC_CAPAB_TUN_TYPE_GENEVE   0x01    /* RFC 8926 */
+#define MAC_CAPAB_TUN_TYPE_VXLAN    0x02    /* RFC 7348 */
+----
+
+We represent this with a `uint32_t` in the provider interface leaving plenty of space for expansion in future, e.g., (NV)GRE (<<rfc2784>>/<<rfc7637>>).
+
+When queried for `MAC_CAPAB_HCKSUM`, drivers are today expected to fill a `uint32_t` of `HCKSUM_*` flags defined in `usr/src/uts/common/sys/dlpi.h`.
+We redefine this payload for backward compatibility with a `mac_capab_cso_t`, and insert a new field to describe tunnel-aware checksum offloads:
+
+.usr/src/uts/common/sys/mac_provider.h
+[code,c]
+----
+#define MAC_CSO_TUN_INNER_IPHDR     0x0001
+#define MAC_CSO_TUN_INNER_TCP_PARTIAL   0x0002
+#define MAC_CSO_TUN_INNER_TCP_FULL  0x0004
+#define MAC_CSO_TUN_INNER_UDP_PARTIAL   0x0008
+#define MAC_CSO_TUN_INNER_UDP_FULL  0x0010
+#define MAC_CSO_TUN_OUTER_IPHDR     0x0020
+#define MAC_CSO_TUN_OUTER_UDP_PARTIAL   0x0040
+#define MAC_CSO_TUN_OUTER_UDP_FULL  0x0080
+
+typedef struct cso_tunnel_s {
+    uint32_t    ct_flags;   /* MAC_CSO_TUN_* flags. */
+    uint32_t    ct_encap_max;   /* maximum encap size */
+    uint32_t    ct_types;   /* supported encapsulation families */
+} cso_tunnel_t;
+
+typedef struct mac_capab_cso_s {
+    /*
+     * This flags member must come first -- the majority of providers do not
+     * handle the full mac_capab_cso_t, and expect the flags-only interface.
+     */
+    uint32_t    cso_flags;  /* HCKSUM_* flags (dlpi.h) */
+    cso_tunnel_t    cso_tunnel;
+} mac_capab_cso_t;
+----
+
+Compatible providers will write the `cso_tunnel` member and signal that it is valid using a new `HCKSUM_TUN` flag.
+Here, `ct_types` is a bitwise OR of `MAC_CAPAB_TUN_TYPE_*` elements supported by the device, and `ct_flags` is the bitwise OR of `MAC_CSO_TUN_*` checksum types supported by the device for both the outer headers and _Upper-Layer Protocols_ (ULPs).
+`ct_encap_max` constrains how large an encapsulation header can be for the offload to be usable, possibly as imposed by a field size in a TX request.
+
+When queried for `MAC_CAPAB_LSO`, we add a new field to the existing capability to capture tunnel-aware TCP large segmentation offload:
+
+----
+typedef struct lso_tunnel_tcp_s {
+    uint32_t tun_pay_max;   /* maximum payload */
+    uint32_t tun_encap_max; /* maximum encap size */
+    uint32_t tun_flags; /* supported operations */
+    uint32_t tun_types; /* supported encapsulation families */
+    uint32_t tun_pad[2];    /* future expansion */
+} lso_tunnel_tcp_t;
+
+/*
+ * Currently supported tunnel classes for tunneled LSO offload.
+ */
+#define LSO_TX_TUNNEL_OUTER_CSUM    0x01    /* hardware can fill outer */
+                                            /* UDP checksum information */
+
+typedef struct mac_capab_lso_s {
+    t_uscalar_t     lso_flags;
+
+    /* ... existing ... */
+
+    lso_tunnel_tcp_t    lso_tunnel_tcp;
+} mac_capab_lso_t;
+----
+
+Compatible providers will write the `lso_tunnel_tcp` member and signal that it is valid using a new `LSO_TX_TUNNEL_TCP` flag.
+`tun_types` and `tun_encap_max` work analogously to `ct_types` and `ct_encap_max`, respectively.
+`tun_pay_max` serves the same role as the existing `lso_max` member of `lso_basic_tcp_ipv4_t`/`lso_basic_tcp_ipv6_t`, marking the largest TCP segment which can be carried.
+`tun_flags` indicates additional capabilities around checksums, option handling etc.
+The only case indicated today is the ability to fill outer headers' L4 checksums via `LSO_TX_TUNNEL_OUTER_CSUM`: this can be useful for indicating to a tunnel device whether it can universally provide additional UDP checksum guarantees.
+The supported flags here do not differentiate between IPv4 and IPv6 support – handling of both is assumed to be fairly universal for this class of offload.
+
+Source for manpage updates corresponding to these changes can be found https://github.com/oxidecomputer/illumos-gate/blob/3f1b0849ead4a2ed02b7abc984169d68f9cd63c6/usr/src/man/man9e/mac.9e[here for mac.9e], and https://github.com/oxidecomputer/illumos-gate/blob/3f1b0849ead4a2ed02b7abc984169d68f9cd63c6/usr/src/man/man9f/mac_hcksum_get.9f[here for mac_hcksum_get.9f].
+
+=== Required datapath changes
+
+Network packets store offload state in the leading `dblk_t` of a chain of segments making up a packet.
+The first change required here is that we must explicitly store the tunnel type of a packet as part of this state.
+While tunnel protocols are typically bound to an IP protocol number and/or well-known port, we need proof from the system (or zone, or guest) that this is the intended behaviour.
+For instance, Geneve (<<rfc8926>>, §3.3) and VXLAN (<<rfc7348>>, §5) recommend that the choice of destination port should be configurable.
+Storing this state within the packet prevents us from needing to track and signal all tunnel mappings down to every driver.
+
+We add a `uint8_t` field to `dblk_t`, using the following values:
+
+.usr/src/uts/common/sys/mac_provider.h
+[code,c]
+----
+typedef enum mac_ether_tun_type {
+  METT_NONE = 0,
+  METT_GENEVE,
+  METT_VXLAN
+} mac_ether_tun_type_t;
+----
+
+This has an impact on `kmem_cache` sizes etc., as discussed in link:../0055/README.adoc[IPD 55].
+All `dblk_t` are set to have a tunnel type of `METT_NONE` when created or returned to the `kmem_cache`.
+As with other offload-related information, the datapath and MAC-provided APIs are responsible for replicating or amending this state during packet clones, pullups, or stripping header layers.
+
+We also need to define new flags representing the validity of the set of inner checksums on a packet:
+
+.usr/src/uts/common/sys/pattr.h
+[code,c]
+----
+#define HCK_INNER_V4CKSUM   0x0020
+#define HCK_INNER_V4CKSUM_OK    0x0040
+
+#define HCK_INNER_PARTIAL   0x0080
+#define HCK_INNER_FULL      0x0100
+#define HCK_INNER_FULL_OK   0x0200
+----
+
+These carry similar meaning to the existing checksum validity flags, applied instead to the _encapsulated_ packet, and still fit within the current bounds of `dblk_t.db_struioun.cksum.flags` (a `uint16_t`).
+The existing flags are treated as they are today if the tunnel type is `METT_NONE`, otherwise they describe the checksum state of the _outer frame_.
+The combination of the flag `HW_LSO`/`HW_LSO_FLAGS` with a non-zero tunnel type is interpreted as a request for LSO _on the encapsulated packet_.
+A driver/NIC which are not tunnel-aware may still look only at the outermost flags, and consider only the outermost header layers.
+
+Finally, offload emulation (and when we choose to apply it) must become tunnel-aware.
+The changes to `mac_hw_emul` and its application of LSO/CSO are mostly straightforward – we walk (and replicate) more headers to reach the inner frame in the case of LSO (being sure to fix up all lengths), and compute requested checksums the inner and/or outer headers as required.
+One constraint in which `mac_hw_emul` should not be overzealous is that outer UDP checksums are allowed to be omitted for tunnelled packets <<rfc6935>><<rfc6936>> – these should only be filled if requested, and omission should be generally permitted in the outer layer.
+The most significant change is that `mac_tx` must be aware of the tunnel type and inner ULP when determining whether offload emulation must be applied, which requires parsing or carrying this information in the `dblk_t`.
+This more expensive logic is not required when the tunnel type is `METT_NONE`, where the existing emulation checks can be used.
+
+=== Packet parsing
+
+`mac_ether_offload_info` is used today by the illumos datapath and MAC providers to have a consistent means of parsing packets.
+To account for tunnels, the `mac_ether_offload_info_t` needs to be able to represent the type and length of a tunnel header located after the last valid L3/L4 outer header:
+
+.usr/src/uts/common/sys/mac_provider.h
+[code,c]
+----
+typedef enum mac_ether_offload_flags {
+    MEOI_L2INFO_SET   = 1 << 0, /* l2hlen and l3proto valid */
+    MEOI_L3INFO_SET   = 1 << 1, /* l3hlen and l4proto valid */
+    MEOI_L4INFO_SET   = 1 << 2, /* l4hlen valid */
+
+    /* vvv NEW vvv */
+    MEOI_TUNINFO_SET  = 1 << 3, /* tunhlen valid */
+    /* ^^^ NEW ^^^ */
+
+    MEOI_VLAN_TAGGED  = 1 << 4,
+    MEOI_L3_FRAG_MORE = 1 << 5,
+    MEOI_L3_FRAG_OFFSET = 1 << 6
+} mac_ether_offload_flags_t;
+
+typedef struct mac_ether_offload_info {
+    mac_ether_offload_flags_t   meoi_flags;
+
+    /* ... existing ... */
+
+    mac_ether_tun_type_t  meoi_tuntype;
+    uint16_t  meoi_tunhlen;
+} mac_ether_offload_info_t;
+
+extern void mac_ether_offload_info(const mblk_t *, mac_ether_offload_info_t *,
+    mac_ether_offload_info_t *);
+extern mac_ether_tun_type_t mac_ether_tun_type(const mblk_t *);
+----
+
+The `mac_ether_offload_info` API must also change to account for encapsulation.
+A caller specifies at least one of the two optional parameters `outer_info` and `inner_info`.
+The function now inspects the tunnel type embedded in a `dblk_t` to determine whether it should attempt to parse the outermost headers to match that tunnel type, enforcing invariants like the presence of UDP as an L4 protocol in Geneve <<rfc8926>> or VXLAN <<rfc7348>>.
+In any `mac_ether_offload_info_t` written by the parser (or set on the packet à la link:../0055/README.adoc[IPD 55]), `meoi_flags` and `meoi_tuntype` are always required to be valid.
+
+Drivers which are not tunnel-aware may still call `mac_ether_offload_info(mp, &meoi, NULL)` to parse only the outermost layers, as they do today.
+
+=== Impact on IPD55
+
+When combined with link:../0055/README.adoc[IPD 55], `dblk_t`-carried packet info must store two layers of lengths and protocol kinds.
+As above, a MAC client may set no/one/both layer(s) of this state:
+
+.usr/src/uts/common/sys/mac_provider.h
+[code,c]
+----
+extern void mac_ether_set_pktinfo(mblk_t *, const mac_ether_offload_info_t *,
+    const mac_ether_offload_info_t *);
+----
+
+This brings us from an 8B overhead to 16B, using the below packing strategy.
+The IPD itself discusses the impact of a larger `sizeof (packed_meoi_t)` on `kmem_cache` sizes.
+We use this to include the necessary `mac_ether_tun_type_t` field.
+
+.usr/src/uts/common/sys/stream.h
+[code,c]
+----
+typedef struct packed_meoi {
+    /*
+     * The flags here contain values of type
+     * mac_ether_offload_flags. Currently, this runs up to
+     * (1 << 6) -- 7 flags. Not all are needed, however:
+     * - Tunnel: MEOI_L4INFO_SET is omitted, and is implied
+     *   by the tuntype and valid tuninfo.
+     * - Packet: MEOI_TUNINFO_SET cannot be part of this
+     *   flagset.
+     * The values stored here contain the rightward shift of
+     * all flags following an omitted entry.
+     */
+    uint16_t t_flags: 6;
+    uint16_t p_flags: 6;
+    uint16_t t_tuntype: 4; /* mac_ether_tun_type_t */
+
+    uint16_t t_l2hlen: DBLK_L2HLEN_WIDTH;
+    uint16_t p_l2hlen: DBLK_L2HLEN_WIDTH;
+    uint16_t p_l4hlen: DBLK_L4HLEN_WIDTH;
+    /* t_l4hlen can be derived from t_tuntype */
+
+    /* L3 len may be unbounded, thanks to v6EHs */
+    uint16_t t_l3hlen;
+    uint16_t p_l3hlen;
+
+    uint16_t t_l3proto;
+    uint16_t p_l3proto;
+
+    uint16_t t_tunhlen;
+    uint8_t p_l4proto;
+    /* t_l4proto can be derived from t_tuntype */
+} packed_meoi_t;
+
+typedef struct datab {
+    /* ... existing fields ... */
+
+    /*
+     * This union is deliberately used for type punning, making it easier
+     * to check 'any valid info' and to unset all fields' validity on
+     * cleanup.
+     */
+    union {
+        uint16_t valid;
+        packed_meoi_t pktinfo;
+    } db_meoi;
+} dblk_t;
+----
+
+When accessed using `mac_ether_offload_info`, the inner and/or outer `mac_ether_offload_info_t` will be initialised using the `packed_meoi_t` and completed using a parse if required.
+In this case, a packet's tunnel type is set using the `mac_ether_set_pktinfo` function according to that in the `outer_info` parameter.
+A non-zero tunnel type on the inner info is considered an illegal argument.
+
+== Impact
+
+In our implementation, we have made the `mac_tx` check on required offloads https://github.com/oxidecomputer/illumos-gate/blob/3f1b0849ead4a2ed02b7abc984169d68f9cd63c6/usr/src/uts/common/io/mac/mac_client.c#L3746-L3806[unconditional], rather than only occurring when https://github.com/oxidecomputer/illumos-gate/blob/3f1b0849ead4a2ed02b7abc984169d68f9cd63c6/usr/src/uts/common/io/mac/mac_sched.c#L646-L674[the simple case Tx cannot be applied].
+By storing parse data for tunneled frames in the `dblk_t`, we can afford to do so as the cost of extracting the inner ULP info is minimised.
+This allows for tunnel devices to unconditionally advertise capabilities to upstream clients without conditionally determining whether they themselves should conditionally perform emulation.
+
+== Open Questions
+
+* The assumption made here is that a device supports all of its tunnel types identically.
+Are there any known devices which would break this expectation?
+
+[bibliography]
+== External References
+
+- [[[rfc2784]]] Farinacci _et al._ Generic Routing Encapsulation (GRE) https://datatracker.ietf.org/doc/html/rfc2784
+- [[[rfc6935]]] Eubanks _et al._ IPv6 and UDP Checksums for Tunneled Packets https://datatracker.ietf.org/doc/html/rfc6935
+- [[[rfc6936]]] Fairhurst and Westerlund. Applicability Statement for the Use of IPv6 UDP Datagrams with Zero Checksums https://datatracker.ietf.org/doc/html/rfc6936
+- [[[rfc7348]]] Mahalingam _et al._ Virtual eXtensible Local Area Network (VXLAN): A Framework for Overlaying Virtualized Layer 2 Networks over Layer 3 Networks https://datatracker.ietf.org/doc/html/rfc7348
+- [[[rfc7637]]] Garg and Wang. NVGRE: Network Virtualization Using Generic Routing Encapsulation https://datatracker.ietf.org/doc/html/rfc7637
+- [[[rfc8926]]] Gross _et al._ Geneve: Generic Network Virtualization Encapsulation https://datatracker.ietf.org/doc/html/rfc8926

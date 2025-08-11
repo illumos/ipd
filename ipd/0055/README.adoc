@@ -1,0 +1,162 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Kyle Simpson <kyle@oxide.computer>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 55 – Placing More Packet Info Into `dblk_t`
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+Network packets in illumos carry offload state in a packet chain's head `dblk_t`.
+This allows MAC consumers to correctly instruct NIC drivers (and the MAC datapath itself) on how packets should be processed for delivery.
+The mechanism today is that the `dblk_t` contains around 8 bytes of information in the `db_struioun` field – this comprises the current packet checksum (full/partial), the TCP _Maximum Segment Size_ (MSS), and flags denoting desired offloads.
+Packet pullup/clone/modification operations are generally responsible for ensuring that this is kept up-to-date in any new/derived packets.
+
+During transmission, the packet structure and its header lengths typically need to be known to execute the promises we have made on offloads.
+NICs require each packet's layer types and offsets, which a driver reparses from first principles using `mac_ether_offload_info`.
+For loopback delivery we rely on `mac_hw_emul` to perform checksum fixup and/or TCP packet segmentation, which again requires a reparse as above.
+Yet in principle the kernel knows the packet structure (because it originated the packet!), and we should not need to waste cycles on re-establishing these facts.
+
+The proposal here is that we move such information into the `dblk_t`: packets would be able to carry their header lengths and types from source to sink, which can be exported as a `mac_ether_offload_info_t`.
+A call to `mac_ether_offload_info` would unpack this information if present, and parse the packet from first principles if it is not.
+While this saves cycles in the transmit path, this change also has applicability to the MAC Rx datapath.
+Some NICs report a packet's header types, lengths, and/or the RSS hash on receipt.
+If a MAC provider were to set this information, this saves illumos from performing extra work during (sub-)flow classification, protocol fanout, etc.
+https://code.illumos.org/c/illumos-gate/+/4176[Post-IPv6 fast path], `mac_ether_offload_info` is used today as the parsing implementation for these features.
+This change also specifically benefits tunnel-aware offloads as part of link:../0056/README.adoc[IPD 56].
+In this context storing a packet's tunnel type within the `dblk_t` to control offload behaviour is necessary at a bare minimum, but avoiding *two* header stack parses per packet is a significant win.
+
+This work is currently implemented alongside link:../0056/README.adoc[IPD 56] in stlouis/Helios commit https://github.com/oxidecomputer/illumos-gate/commit/53ed1e30b6807e5e9d694326390914e7c53c0c94[53ed1e30b6807e5e9d694326390914e7c53c0c94].
+The linked commit does not wire up upstream clients such as `ip` to fill out this information; we use this in the https://github.com/oxidecomputer/opte:[OPTE kernel module] after packet encapsulation and decapsulation, which benefits both viona and the downstream NICs used for packet transmit on the order of ~200Mbps.
+As with IPD 56, this work has been in use in our development environments and customer releases for several months now.
+
+== Proposal
+
+Each `dblk_t` carries a _packed_ representation of the `mac_ether_offload_info_t`, taking advantage of known maximum sizes for each layer where possible.
+
+.usr/src/uts/common/sys/stream.h
+[code,c]
+----
+/* Ethernet Q-in-Q requires 22 Bytes. (5b -> max=31) */
+#define	DBLK_L2HLEN_WIDTH	5
+/* Max L4 is TCP -- 60 Bytes with options. (6b -> max=63) */
+#define	DBLK_L4HLEN_WIDTH	6
+
+#ifdef _KERNEL
+CTASSERT((1 << DBLK_L2HLEN_WIDTH) - 1 >= 22);
+CTASSERT((1 << DBLK_L4HLEN_WIDTH) - 1 >= 60);
+#endif
+
+typedef struct packed_meoi {
+	/*
+	 * The flags here contain values of type
+	 * mac_ether_offload_flags.
+	 */
+	uint8_t flags;
+	uint8_t l4proto;
+
+	uint16_t l2hlen: DBLK_L2HLEN_WIDTH;
+	uint16_t l4hlen: DBLK_L4HLEN_WIDTH;
+
+	/* L3 len may be unbounded, thanks to IPv6EHs */
+	uint16_t l3hlen;
+
+	uint16_t l3proto;
+} packed_meoi_t;
+
+typedef struct datab {
+	/* ... existing fields ... */
+
+	/*
+	 * This union is deliberately used for type punning, making it easier
+	 * to check 'any valid info' and to unset all fields' validity on
+	 * cleanup.
+	 */
+	union {
+		uint8_t valid;
+		packed_meoi_t pktinfo;
+	} db_meoi;
+} dblk_t;
+----
+
+This consumes an extra 8 bytes per `dblk_t` when accounting for a single layer of headers.
+When accounting for an extra tunneled layer (link:../0056/README.adoc[IPD 56]), this would consume 16 bytes.
+
+MAC providers and clients then query and set this information via the following `mac_provider.h` interface:
+
+[code,c]
+----
+extern void mac_ether_offload_info(const mblk_t *, mac_ether_offload_info_t *);
+extern void mac_ether_set_pktinfo(mblk_t *, const mac_ether_offload_info_t *);
+extern void mac_ether_clear_pktinfo(mblk_t *);
+extern boolean_t mac_ether_any_set_pktinfo(const mblk_t *mp);
+----
+
+The intent is that all consumers must strictly go through a function interface, to allow sufficient freedom to develop the underlying types as more capabilities are developed within MAC.
+We do not want any proliferation of direct access to the `packed_meoi_t`, as has happened with macros like `DB_LSOMSS` vs. `mac_lso_get`.
+
+Packet parse info is modified using `mac_ether_set_pktinfo` or `mac_ether_clear_pktinfo`.
+These operations require a reference count of 1 on the `dblk_t`, which should be checked by the caller.
+The call signature of `mac_ether_offload_info` is identical to that used today, serving as a drop-in replacement which _may_ rely on this information, if present.
+Callers are allowed to provide partial information (e.g., L2 and L3, or L3 and L4), but it *must* be correct.
+MAC or DLPI may choose to retrieve, modify, and then set this information as packets are modified or prepended to.
+
+The disposition in our current implementation is to clear this information as it is delivered out of MAC (before handoff to DLPI or the fastpath to IP).
+ICMP and ARP are paths known to reuse `mblk_t` s for the construction of replies, but doing so with incorrect offload flags could lead to the transmission of corrupted packets.
+Clearing this state at the MAC boundary isolates us from this risk today, at the cost of preventing MAC clients from using packet parse data.
+Another point is that the refcount behaviour of `ip` for TCP packets typically precludes us from having `mac_ether_offload_info` automatically set offload information on a packet after any successful parse.
+
+== Impact
+
+The `dblk_t` type is 8B larger (or 16B larger when tunnel-aware), relative to an initial 112B.
+STREAMS-based interfaces are used more widely than just the netstack, thus costing more overhead per allocated STREAMS message.
+
+The change in struct size also has an impact on how `dblk_t` caches are allocated.
+`dblk_t` caches are constructed using cache line-aligned buffer sizes, with the buffer allocated adjacently for any size smaller than a page (4096B).
+E.g., `common/io/stream.c` lists 16B and 80B as entries within `dblk_sizes[]`; these correspond to total `kmem_alloc` calls of 128B and 192B respectively.
+An increase of 8B in `sizeof (dblk_t)` reduces the message buffers to 8B and 72B respectively.
+An increase of 16B (link:../0056/README.adoc[IPD 56]) leads to the loss of the first such `kmem_cache`, leaving 64B as the smallest message buffer size.
+
+== Future Developments
+
+Explicitly tracking a packet's structure allows us, at some point, to reconsider the role of partial checksums in the network stack.
+Given a fully parsed packet and today's checksum flags, we arguably have no need of `db_cksumstart`/`db_cksumend`/`db_cksumstuff`.
+The offset of a packet checksum within its layer is, more often than not, fixed, and so easily derived from this context.
+This would free up 24B within `dblk_t`, more than counteracting the cost of `packed_meoi_t` with or without link:../0056/README.adoc[IPD 56].
+
+A more extreme proposal would use this as the basis for _removing_ partial checksums, and handling only the fully computed cases and offloaded cases.
+This would free up flags in the provider interface (and generally simplify logic throughout the stack).
+NICs which require a partial checksum would compute this themselves (using a `mac_provider` API) before transmission on the basis of the above parse data.
+
+== Open questions
+
+* Should packet info live unconditionally within `dblk_t`?
+Would there be value in moving _all_ MAC-specific elements into a pointer, and filling this from a separate `kmem_cache`?
+How would we formalise that contract with callers of `allocb`?
+At what size does this pointer chasing outweigh the cost of a larger `dblk_t`, if at all?
+
+* This allows a driver to aid the Rx pathway. Should we also make space for a packet's flow/RSS hash, to assist in fanout?
+Would we aim to include the hash type, included fields etc.? Are there other fields we might want to pull in here?
+
+* How best should we detect, triage, and tackle clients such as ICMP which reuse `mblk_t` entries for reply packets? Would a https://code.oxide.computer/c/illumos-gate/+/485/comment/dbadd441_1725d5fa/[stale info flag] suffice here?

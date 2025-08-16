@@ -1,0 +1,958 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 57 I2C Framework
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+This IPD proposes a new framework for I^2^C, SMBus, and I^3^C class
+devices as well as initial support for:
+
+* A new userland `i2cadm` command to manage devices
+* A library that drives it, `libi2c`
+* A nexus driver, `i2cnex` that helps facilitiate support for this
+* A device driver framework for I^2^C and SMBus controllers
+** Initial support for the Designware I^2^C Controller found on AMD
+systems (which can be extended to others)
+** Initial support for the Intel PCH SMBus controller that's been around
+for quite some time
+* A device driver framework for I^2^C muxes:
+** Initial support for the PCA9545 and LTC4302/6 families
+* A device driver framework for I^2^C devices and register access
+
+== Background
+
+I^2^C is a common form of two-wire bus protocol that was developed by
+Phillips in the 1980s. The two wires refer to a shared data line and a
+separate shared clock line. To perform a transaction, an I^2^C
+controller drives the clock at a fixed frequency, and devices on the bus
+latch logical bits as the clock progresses based on whether the data
+line is a logic high or logic low. Transactions on the bus are framed in
+terms of a Start condition and Stop condition, which allows the
+controller to indicate it is taking control of the bus.
+
+I/O on the bus is generally framed as a series of 8-bit I/O segments
+followed by an explicit acknowledgement from the other end, which occurs
+by either the device (when writing) or the controller (when reading)
+driving the bus low. This is called an 'ack'. When there is no
+acknowledgement on the bus, this is called a 'nack'. Nacks can show up
+at different times in the protocol and have different meanings.
+
+The I^2^C bus is a shared bus, meaning that multiple devices are on the
+same bus. The data and clock wires go to **all** devices on the bus.
+This means that there needs to be a way to distinguish between different
+devices. This is done in I^2^C with a 7-bit address (though there are
+some extensions for 10-bit addresses). In general, addresses are not
+discoverable and instead you need to come with knowledge of what
+addresses belong to what devices on the bus. This is very different from
+PCIe or USB, where there is a standard way to discover what is at the
+other end of a connection. In addition, there are addresses that are
+explicitly reserved for special use cases at the beginning and end of
+the 7-bit address space.
+
+To begin a transaction, after sending a Start, the controller writes out
+a 7-bit address followed by a one-bit read/write indicator. After this,
+the controller expect an explicit ack on the next clock cycle. A device
+will ack this address if it owns this address. However, there is no way
+to avoid collisions! This means it's possible that very different
+devices can acknowledge an address with different semantics, usually
+leading to chaos! However, as is the fashion in I^2^C there are some
+cases where this is actually expected and used to effectively broadcast
+a write. If there are no device that own the address then the controller
+will see a 'nack' and know that there is no one at that address on the
+bus.
+
+At this point, a series of 8-bit data frames are sent followed by an
+'ack' or a 'nack'. If the controller is writing data, the device will
+generate the ack. If the controller is reading data, it will generate the
+ack to indicate that it has read the byte. Once they are done reading or
+writing, the controller issues a stop condition.
+
+This handles the basic read and write case. Devices all have different
+abstractions. There is no standard for how to communicate to a device.
+For example, some devices have a single control register and if you
+write a byte, it will replace that value. Others have the notion of
+registesr, where there is an 8-bit or 16-bit register address that you
+can write to and then either read or write. Sometimes the device will
+remember that address register, other times it will need to be written
+each time. Often times, the address register is auto-incrementing.
+Meaning the device will reply with subsequent bytes.
+
+To support some of these paths, I^2^C has the ability to indicate what
+they call a repeated start condition, which allows the address and
+direction on the bus to change (though many controllers only support
+changing the direction). For example, if we wanted to read register 0x6
+from a device, one would begin with a start condition, putting the I^2^C
+address on the wire with a write bit, recive an ack, the controller
+would write the register value and wait for an ack from the device. At
+that point, it would put a repeated start sequence on the bus with the
+same I^2^C address, but using a read bit. Then the controller would
+pulse the clock for a byte, receiving data from the target and issue an
+ack at the end of every 8-bit data frame. 
+
+=== Frequencies
+
+I^2^C started life as an open-drain style bus that runs at 100 kHz.
+Open-drain buses are ones where there is a pull-up resistor and
+basically a device either drives the bus-low, overpowering the pull-up
+resistor and generating a logic 0, or it outputs high-impedance
+(basically nothing) and the pull-up resistor drives the bus high.
+
+There are different frequencies that the bus supports such as 400 kHz
+Fast mode, 1 MHz Fast-mode Plus, 3.4 MHz High-speed operation, and 5 MHz
+Ultra-Fast mode operation. At some of these higher bus speeds, the bus
+is no longer open-drain and instead becomes a push/pull style bus where
+either the controller or the device are actively driving the signal both
+low and high and are no longer relying on the pull-up resistor.
+
+As part of this, many controllers support common timing parameters,
+which need to change based upon the speed. These include items like the
+rise time and fall time of the clock and data lines.
+
+=== Devices and Addresses
+
+In the simplest case, a device is manufactured and has a hard-coded
+address. This 7-bit address is the only address that it will reply to.
+More commonly, to avoid address conflicts, there are cases where the
+device can be configured based on the pins on its chip to select a
+specific address when it comes up. Either way, unfortunately the
+simplicity of this single address model does not hold for all devices.
+It's worth discussing several different examples of these as they will
+ultimately influence different parts of our design.
+
+==== Devices with Multiple Addresses
+
+A I^2^C device can sometimes end up listening on multiple addresses.
+There are two different classes of these:
+
+. Complex devices that have logically disjoint services.
+. Devices where you need to use both addresses to correctly use the
+functionality.
+
+As an example of group (1), an NVMe device will often support several
+different I^2^C interfaces. There is the full NVMe-MI spec, which is on
+one set of addresses and the NVMe-basic management command which is on
+another. There may even be a third set with a FRUID that is built into
+the device. Notably, each of these interfaces is independent of one
+another. While only one can be talked to at a time, they return
+different information and don't generally influence one another.
+
+Another example of this are Zen family CPUs. AMD implements a single
+I^2^C interface called APML where there is one address that can be used
+to get temperature information from the CPU and a second address which
+can be used to perform RPCs that can get and set properties of the CPU.
+
+These cases are simpler to model in implementations because they usually
+have independent drivers where the functionality doesn't overlap.
+
+Group (2) is more interesting and a little more chaotic.  For example, a
+512-byte EEPROM may be broken into two 256-byte pages.  The device
+address selection generally only allows a 256-byte random read and to
+switch which of the 256-byte regions are active an explicit write to the
+page select will be required. This means that a random read of a device
+requires for a write to the page select address (which itself may
+require a register write) to select the proper page. Then a second
+non-restarted read transaction will be issued to get the I/O that is
+required.
+
+There are some devices like the AT24CSW04X where instead of having a
+specific page selection, it uses a address bits to indicate the page
+itself.
+
+==== Devices with Shared Addresses
+
+As nothing in I^2^C is simple, there are classes of devices that devolve
+into using an address that is shared across the bus to perform certain
+activities. The DDR4 EEPROM, EE1004, is a great example of this device.
+This is a 512-byte device that is split into two 256-byte pages. While
+the address for the EEPROM itself is device-specific, all of these
+devices share the same pair of addresses for selecting a page.
+Specifically writing to address 0x36 indicates that one wants to perform
+I/O to page 0 and writing to address 0x37 indicates page 1 instead.
+
+The implication of this is that all the devices on the bus will change
+when a page select command is issued. This makes certain classes of
+drivers need to be much more careful than one might expect. Especially
+in the face of muxing.
+
+==== Devices that Imply Others
+
+One last thing about device discovery is that certain devices can
+provide information about others that exist. For example on a DDR3-5
+DIMM information in the SPD (serial presence detect) data will inform
+someone of whether or not temperature sensors or power controllers exist
+at other well-known addresses off of the bus.
+
+=== Multiplexors and Switches
+
+As you can imagine from the previous section, devices can easily end up
+overlapping in addresses. A common case of this is in JEDEC DDR4 or DDR5
+devices where a given I^2^C bus only has support for up to 8 devices and
+many systems need more than 8 DIMM slots!
+
+To support this, there are various I^2^C switches and multiplexors.
+These devices can be thought of similar to an Ethernet switch. There is
+an upstream port and there are a variable number of downstream ports.
+The devices have different ways of controlling which downstream ports
+are enabled. In the case of multiplexors only a single one can be
+enabled at a time.
+
+These devices are generally controlled either through in-band means,
+meaning that I^2^C transactions are being explicitly issued to a device
+with an address on the bus to change things, or there is some
+out-of-band means of controlling this. For example, a series of GPIOs
+that can be used to uniquely select a bus.
+
+With multiplexors and switches, each downstream bus can duplicate
+addresses due to the ability to constrain it to only one (or none!) bus
+being active. This solves address conflicts and are commonly present in
+the case of complex I^2^C topologies.
+
+=== SMBus
+
+SMBus, or the System Management Bus, is similar to I^2^C and was created
+by Intel and Duracell in the 1990s. Originally it targeted batteries,
+but was gradually expanded and has been the primary interface in decades
+of Intel chipsets (though they do also have I^2^C and I^3^C now).
+
+SMBus is mostly compatible with I^2^C. It uses the same principles on
+the physical layer; however, SMBus has a fixed number of commands that
+can be sent on the wire with very explicit data payloads. Generally
+speaking, any SMBus transaction can be represented as an I^2^C
+transaction; however, the opposite is not true. Many SMBus controllers
+will only output the specific commands defined by the SMBus
+specification.
+
+In general, every SMBus command has a fixed command code that it
+includes. This is generally analogous to the register number. SMBus 2.0
+is the most ubiquitous version of the standard. It defines 8-bit and
+16-bit register reads and writes. It also has the notion of block reads
+and writes which include the number of bytes to be read or written in
+addition to the command register. Note, while I^2^C controllers can
+write this pattern, many devices do not support this.
+
+SMBus 3.0 was introduced which added support for reading and writing
+32-bit and 64-bit registers and increased the block read/write size from
+32 bytes to 255 bytes. However, uptake on SMBus 3.0 has been varied.
+
+One other major difference that SMBus has is that it introduces the idea
+of clock stretching. That is, that a target device may basically hold
+onto the clock and take its time, up to 25 ms, before it responds. This
+delay basically means that a target device doesn't have to reply in a
+single clock cycle.
+
+==== PEC
+
+One additional thing that SMBus introduced, which has come back to some
+I^2^C devices, is the idea of a PEC (packet error code) byte. This is
+basically an optional CRC-8 that is calculated over the entire message,
+both the data and address parts.
+
+PEC support generally requires both controllers and devices to be
+configured for it and to enable its use.
+
+=== PMBus
+
+PMBus, or the Power Management Bus, often comes up in these discussions.
+PBMus is a specification that sits on top of SMBus and defines a
+standardized register interface for different classes of power devices.
+It doesn't change the actual communication protocol used. While common
+frameworks for dealing with PMBus devices can be useful, this is not a
+part of this IPD and is left as future work as it builds on top of all
+of the other interfaces this IPD proposes.
+
+=== I^3^C
+
+The I^3^C specification is a specification that has become more
+prevalent due to its uptake in DDR5 based devices. The bus supports
+traditional I^2^C operation; however, also provides a number of higher
+data rates operating at 12.5 Mbit/s and faster. There are two different
+versions of the specification. There is the normal and basic
+specifications. The basic specification has seen more uptake due to it
+leveraging non-royalty based licensing.
+
+The I^3^C bus supports several different modes on top of the normal
+I^2^C behavior such as:
+
+* An explicit dynamic address assignment mode, which is a 48-bit unique
+  address. There is no support for I^2^C 10-bit addressing.
+* An ability to transition between I^2^C and I^3^C modes.
+* A series of common command codes that all I^3^C targets are supposed
+  to listen to.
+
+Most of these changes and differences impact the controller APIs. As we
+expand support here initially, we don't anticipate having to change the
+broader client or mux APIs.
+
+=== Device Tree
+
+OpenFirmware never formally adopted a representation for I^2^C in IEEE
+1275. There are two different ways that have existed: the way that Sun
+used this in SPARC and the way that Linux has used it in flattened
+device tree.
+
+The main distinction comes down how are addreses represented in reg[].
+While both set `#size-cells` to zero, they vary in how they specify
+`#address-cells`. Sun used a value of 2 for `#size-cells` where as
+Linux uses 1. Linux combines the addressin the lower bits and puts a
+flag indicating whether the address is a 7-bit or 10-bit value in the
+upper bit of the 32-bit integer.
+
+Sun on the other hand used two integers. The second integer was always
+the 7-bit address as there was no 10-bit address usage on those
+platforms as far as I could determine. However, the first integer was
+used on some to indicate what mux to use due to `xcal`, the Sun Blade
+1000. 
+
+=== `sun4u` Design
+
+There was an implementation of various I^2^C devices and nexus drivers
+that were specific to the `sun4u` platform. This can be found in
+`uts/sun4u/io/i2c`. There are a few notable things with this design and
+reasons that we don't really reuse this design:
+
+* There is no ability to instantiate muxes in the tree. Only one series
+  of muxes was allowed and was part of the `reg[]` array. This precludes
+  a lot of designs that exist on systems today.
+* There is no way to instantiate or indicate that devices exist beyond
+  those enumerated by firmware. While this worked for SPARC, it doesn't
+  work for x86 where almost nothing is described by Firmware or ARM
+  where it varies. For example, the stock device trees for various
+  Raspberry PI devices enumerate I^2^C controllers, but devices are
+  user-specific.
+* The device ioctls and interfaces don't really allow for discovery of
+  ports or changeable properties.
+* There was no common nexus implementation for controllers. While there
+  is a little bit of glue, each driver had to implement its own copy of
+  the bus ops.
+* There did not appear to be a notion of gaining exclusive access to a
+  device.
+
+There are definiteliy some useful ideas and things to pick up on here
+such as the notion of clients and some of the transfer structures;
+however, there are a bunch of features and design aspects that don't
+make sense outside of this platform and how it was structured. As such
+we do not try to leverage the original implementation or the drivers
+which are mostly designed to fit into picl.
+
+== Design and Concepts
+
+There are a few initial high-level entities that the entire system is
+designed around:
+
+CONTROLLERS::
+
+Controllers are devices that know how to speak the I^2^C or SMBus
+protocol. Requests go through these devices to get on the wire. These
+are generally PCI or MMIO devices themselves. Controllers implement the
+I^2^C provider interface.
+
+DEVICES::
+
+A device is a target on the bus that speaks the I^2^C or SMBus protocol
+and provides some functionality. Common devices include EEPROMs,
+temperature sensors, GPIO controllers, power controllers, and more.
+Each device has a unique address. A plethora of device drivers are used to
+implement support for devices, which leverage the kernel's I^2^C/SMBus
+Client interfaces.
+
+MULTIPLEXORS::
+
+A multiplexor is a device that allows one to switch between multiple
+different downstream buses. A multiplexor must implement the kernel's
+Mux APIs. While a mux commonly is an I^2^C device itself, it does not
+have to be.
+
+BUS::
+
+A bus represents a single pair of wires (clock and data) that connects a
+controller to multiple devices. Each bus has its own set of devices with
+unique addresses.
+
+PORTS::
+
+Controllers and multiplexors both are devices that have a varying number
+of ports under them. Devices can be created or enumerated under ports.
+
+To facilitate and ease the management of all of these things, the system
+is organized around a core kernel framework with the `i2cnex` driver
+which acts as both a nexus driver for controllers, ports, and
+multiplexors and provides all of the core interfaces for userland to
+interact with it. The `i2cnex` has multiple instances which are used to
+represent controllers and various kinds of ports. In addition, this
+device implements the `bus_ops` that everything uses and creates all the
+minor nodes that can be used to interact with.
+
+Let's look at an example that illustrates all of the major components:
+
+----
+  dwi2c@2
+    i2cnex@dwi2c2
+      i2cnex@port0
+        ltc4305@0,4a
+          i2cnex@ltc43060	
+            i2cnex@1
+              ee10004@0,50
+            i2cnex@2
+              ee10004@0,50
+----
+
+This tree begins with a **controller**: `dwi2c@2`. This is the
+Designware I^2^C controller. This binds to the <<kern-ctrl>> with some
+information about itself and several operations vectors. All I^2^C and
+SMBus requests flow through the tree up to the controller through the
+`i2cnex` driver.
+
+Immediately underneath the driver is the first instance of `i2cnex`,
+which uses the unit address of the controller's name: `i2cnex@dwi2c2`. A
+minor is created that represents the controller itself as well.
+Underneath that we have a number of ports. Each port under a controller
+represents a distinct I^2^C bus. While some controllers have just a
+single port and there are multiple instances of the controller,
+sometimes the controller has more than one bus it can target, often with
+the help of an I/O mux.
+
+Under this we see our first **device**, `ltc4306@0,4a`. Let's take the
+different components apart here:
+
+* `ltc4306` is the name of the device node.
+* `0,4a` is the unit-address which corresponds to the device's I^2^C
+  address. The general scheme here corresponds to the design of the
+  `reg` property and is phrased as `<address type>,<address>`. Here `0`
+  indicates a 7-bit address and `4a` is the address.
+
+The `ltc4305` is a **multiplexor** (and its cousin the `ltc4306` is that
+but also has a GPIO controller built in) that provides two distinct
+ports.  In this case the `ltc4306` driver would be attached to this
+device. That device leverages the <<kern-client>> related support to
+implement the <<kern-mux>>. Because it is a multiplexor, there is an
+instance of `i2cnex` to represet the mux itself. The unit address here
+is currently `ltc43060` which is the driver name combined with its
+intance.
+
+This multiplexor enumerates two different ports under it which are named
+following the dataset. Each port is its own instance of `i2cnex`. This
+is where one sees `i2cnex@1` and `i2cnex@2`. Address overlap between
+the downstream ports is allowed, which is why we see two devices with
+the same address.
+
+Finally the pair of `ee1004@0,50` are two different instances of a type
+of EEPROM. Notably, because each one is under the same level mux in the
+tree they are allowed to have overlapping addresses. Only one can ever
+be talked to at time due to the use of multiplexors.
+
+=== The devices tree and `/dev`
+
+The devices tree is laid out following the design above. Effectively,
+the hierarchical nature of the I^2^C bus is laid out in the tree. This
+is similar to what non-sun4u designs have done in this space.
+
+Specifically, whenever a kernel controller is enumerated, an instance of
+`i2cnex` will be attached underneath it. The `i2cnex` device has a
+property on it to identify what kind of entity it represents to
+userland. This is done through the `i2c-nexus-type` property. The
+property can take the following values:
+
+* `controller`: indicating that the nexus represents the controller.
+  This is always at the root of an `i2c` tree.
+* `port`: This represents a port in the tree. There is always an
+  instance of a port under a controller or a mux for each port that they
+  have.
+* `mux`: Indicates that this is a multiplexor in the system.
+
+In addition to this property, each device exposes a `devctl` minor node
+that is the primary consumption point for userland software. The actual
+`ioctl(2)` interface is not intended to be a stable interface, which is
+instead the library and command.
+
+Each device that is created has the following properties associated
+with it:
+
+* `device_type` is set to `i2c`. We use `i2c` as a general catch-all for
+  2 wire devices right now. This will continue to be true even if these
+  are under an i3c controller.
+* The `#size-cells` property will be set to `0`. There are no sizes for
+  addresses on the bus.
+* The `#address-cells` property will be set to `2`. This is similar to
+  `sun4`, though its contents are different and different from how the
+  existing Linux device tree handles things. Currently the first cell
+  will be used to indicate the class of address, i.e. whether it is
+  7-bit or 10-bit. The second cell is used to contain the address
+  itself.
+* Devices are always enumerated in the tree under an `i2cnex` port. The
+  corresponding parent port will create a minor node that serves as a
+  device control character device. This is critically done outside of
+  the device driver so that device drivers have full control over their
+  minor nodes. When this isn't the case (such as in mac(9E)), it has
+  proven a bit challenging and caused us to develop frameworks where the
+  framework utilizes its own minors.
+
+In addition to the /devices tree, we would like to have a reasonable set
+of names for discovering these in /dev under `/dev/i2c`. This will
+provide a way to see and discover the tree and device nodes that are
+relevant for manipulating devices under the bus that doesn't require
+walking /devices per-se.
+
+The format of this is still TBD. We are working on having a uniform
+syntax to refer to entities in userland and this will want to mimic that
+syntax as closely as possible to make this relatively useful. The
+`/dev/i2c` tree will first be indexed by controller and port, e.g.
+`/dev/i2c/dwi2c0`, `/dv/i2c/dwi2c1`, etc.
+
+XXX Finish figuring this out.
+
+=== Kernel Abstractions
+
+The kernel provides several different groups of abstractions and
+interfaces for consumers to implement. We start with the client APIs and
+work our way up through muxes and controllers.
+
+==== Error Handling
+
+There are a diverse set of errors and conditions that can occur in the
+I^2^C world. Inspired by work in
+https://github.com/illumos/ipd/blob/master/ipd/0043/README.adoc[IPD 43
+NVMe 2.0, libnvme, and the nvme(4D) ioctl interface], we have tried not
+to overload the classic `errno` and figure out how to map diverse codes
+back into errors. Instead, we try to use semantic enumerations for
+errors. The general I/O path and user commands all use the
+`i2c_error_t`.
+
+The `i2c_error_t` structure is made up of two components:
+
+. The `i2c_errno_t` which indicates a non-I/O controller related error.
+These are generally broken into different groups. There is `I2C_CORE` to
+indicate that this is shared across the different consumer. There is
+`I2C_CLIENT_` for the kernel client-specific errors, `I2C_IOCTL_` for
+ioctl intrface related issues, etc.
+. The `i2c_ctrl_error_t` which is used to describe an I/O error
+generated by a controller.
+
+When an API returns both of these pieces of information, then it will
+use the `i2c_error_t` structure to pass that around. Otherwise, it will
+often directly return the `i2c_errno_t` in place of a general `bool`
+argument.
+
+Other subsystems have their own classes of errors that are used. For
+example, mux registration and controller registration (eventually) use
+their own semantic errors to indicate what has happened.
+
+Userland has its own set of errors; however, those are inspired by the
+various kernel ones and kernel errors are translated, much like in
+libnvme.
+
+[[kern-client]]
+==== Client APIs and Transactions
+
+Client APIs are provided by
+https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/sys/i2c/client.h[`<sys/i2c/client.h>`].
+There are a few different top level entities in this:
+
+* The `i2c_client_t` represents how a device driver can communicate to a
+  device.
+* The `i2c_reg_hdl_t` provides abstractions to simplify accessing
+  devices that are structured as a series of registers on the bus.
+* The `i2c_txn_t` is used to lock the bus and ensure that someone has
+  exclusive access to it for a series of calls.
+
+Let's start with the `i2c_txn_t`. This is perhaps one of the most
+important things in the design and impacts multiplexors and a lot of the
+`i2cnex` implementation. The I^2^C bus is designed such that only one
+entity can be operating on it at any given time. That is, there is no
+such thing as multiple outstanding I/Os or I/O pipelining.
+
+In addition to I/O, controllers also expose properties. We want to
+ensure that only one entity is changing properties or performing I/O at
+any given time. The entity that is doing that is represented by holding
+an `i2c_txn_t`. The `i2c_txn_t` is not strictly a thread-local
+structure. This is so drivers have a bit of flexibility in how they use
+this (e.g. if something needs to call timeout or there are other
+designs).
+
+In addition, it is not tied to a single client or device because there
+are cases where it needs to move between them. For example, the
+`i2c_txn_t` is passed to the kernel when performing I/O as it needs to
+use it for the multiplexor APIs as not every driver is solely a
+multiplexor. Further, some devices such as the `ee1004` and other
+EEPROMs end up having to talk to multiple different addresses to perform
+their actions. In the case of the `ee1004` driver it uses different
+devices to change pages, where other EEPROMs end up having multiple
+addresses to get to each bank.
+
+While these are important, we don't want to force this complexity into
+drivers that don't care about it. So for those, the `i2c_txn_t` can
+always be passed as `NULL`, which indicates to the kernel to just take
+and release a transaction. There are a pair of APIs related to taking a
+bus lock:
+
+* `i2c_bus_lock`: This requires a client and lets someone specify where
+  it's a blocking or non-blocking request. This completes and returns
+  the user an `i2c_txn_t *` that represents their bus lock.
+* `i2c_bus_unlock`: This unlocks the bus and consumes the `i2c_txn_t *`.
+  Just like improper use of `mutex_enter` and `mutex_exit`, the system
+  will look for those cases of programmer error and panic() if they occur.
+
+Next, let's turn to the idea of the `i2c_client_t`. The `i2c_client_t`
+is used to allow a device driver to cons up something so that it can
+talk to the underlying entity. Currently these methods all rely on
+having the corresponding `dev_info_t` and are expected to be from the
+driver itself. Though this should be flexible enough to facilitate
+something like the LDI.
+
+Here, a client refers to an instance of its `reg[]` property, which
+contains the devices addresses. In addition to being able to specify the
+entry in the `reg[]` array, which is generally just going to be `0`, for
+the first entry, a driver can specify this via the DTIC or device type
+identifier code. These are a semi-standardized set of codes that break
+apart the 7-bit I^2^C address into a 4-bit DTIC and a 3-bit select
+address. This is most common in the various DDR standards.
+
+Sometimes, devices need to claim addresses that are not part of their
+`reg[]` array. For example, the `ee1004` driver uses a global address to
+change pages. Most instances of this device whether specified by a
+person or device tree do not think to include this address in the
+`reg[]` array. To facilitate this there is a notion of being able to
+claim an address. An address can be claimed as either a shared address
+or an exclusive address. An exclusive address belongs to a single
+dev_info_t, where as a shared address can be claimed by all instances of
+a given driver.
+
+Once a client has been obtained, a device driver can perform I/O. All of
+the I/O functions have the following general signature:
+
+----
+bool i2c/smbus_<name>(i2c_txn_t *, i2c_client_t *, <args>, i2c_error_t *);
+----
+
+These functions all return `bool` to indicate a successful completion or
+a failure. The `i2c_txn_t *` is optional. If one is not passed in, then
+the system will try and obtain one. This is treated as a blocking hold.
+The client is the client that was mentioned up above.  Finally, error
+information will be returned in an optional `i2c_error_t`. We have three
+primary classes of I/O functions:
+
+I^2^C STRUCTURED I/O::
+
+These I/O functions such as `i2c_client_io_wr` are designed to perform
+an arbitrary I^2^C write and then read. I^2^C is generally more flexible
+than SMBus.
+
+SMBus STRUCTURED I/O::
+
+These I/O functions fit in the SMBus pattern and signatures. These deal
+with the explicit SMBus defined commands such as Send Byte and Write
+Byte. They generally include a command code in addition to the actual
+structure. SMBus commands are more restricted than I^2^C.
+
+REGISTER STRUCTURED I/O::
+
+The final class of I/O is register structured. Here, much like the
+https://illumos.org/man/9S/ddi_device_acc_attr[`ddi_device_acc_attr_t(9S)`]
+which is used to describe different attributes of accessing a device,
+the same thing is provided here. This takes care of cases where there
+are Endian considerations, different address and data lengths, etc.
+These interfaces are `i2c_reg_get` and `i2c_reg_put` and allow for
+multiple values to be read and written at once.
+
+A key component of this is that the kernel will attempt to translate all
+I^2^C and SMBus transactions into the corresponding appropriate form for
+the controller. Not all requests can be translated between one another
+and the kernel will generate errors for that as well.
+
+Examples of prototype client drivers:
+
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/eeprom/ee1004/ee1004.c[EE1004
+EEPROM Driver (DDR4 SPD)]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/gpio/pca953x/pca953x.c[PCA953x
+Family GPIO Controller]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/pca954x/pca954x.c[PCA954x
+family Mux]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/ltc4306/ltc4306.c[LTC4306/LTC4305
+Mux and GPIO Controller]
+
+[[kern-mux]]
+==== Multiplexor Provider APIs
+
+Multiplexor drivers fall into two different camps: those that are
+managed in-band and are I^2^C devices and those that are not. Regardless
+of the kind of mux, all muxes are required to implement the mux APIs
+defined in 
+https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/sys/i2c/mux.h[`<sys/i2c/mux.h>`].
+
+A mux driver registers with the kernel and provides APIs to:
+
+* Name its ports. There are two default functions to name ports based on
+  a 0s and 1s-based index. These are provided as in general we want port
+  names to match what datasheets describe.
+* Enable a segment. Here a mux is going to enable a single segment. We
+  do not support enabling multiple segments at the same time.
+* Disable all segments. The API here is designed such that a single port
+  could be disabled; however, our expectation for now is that drivers
+  will only implement the disable all functionality.
+
+A driver can support more than just mux functionality. Because of this,
+all of the mux enable and disable APIs will pass a valid `i2c_txn_t *`
+into them that the driver should use. For example, the LTC4306 is both
+a mux and a GPIO controller. It implements both interfaces. While the
+GPIO operations may want exclusive access to the bus to coordinate
+register changes, it cannot conflate the transactions that are being
+used for the mux and for GPIO services, even though they use the same
+`i2c_client_t`.
+
+Examples of prototype mux drivers:
+
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/pca954x/pca954x.c[PCA954x
+family]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/ltc4306/ltc4306.c[LTC4306/LTC4305]
+
+[[kern-ctrl]]
+==== Controller Provider APIs
+
+Controllers implement an I^2^C provider interface found in
+https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/sys/i2c/i2c_provider.h[<sys/i2c/i2c_provider.h>].
+Controllers identify the type of controller they are, which impacts
+which of the various I/O operations that are expected to be implemented.
+A driver needs to implement the following basic APIs:
+
+* Optional: a way to name its ports. If a way is not provided, the
+  system will use zero based indexing.
+* Required: an I/O submission function. There is a different one for
+  I^2^C versus SMBus as these are different kinds of requests.
+* Required: a way to get properties. XXX This is not yet present.
+* Optional: a way to set properties. XXX This is not yet present.
+
+Controllers our guaranteed that their I/O function will only be called
+from one location. Controllers indicate errors for I/O operations
+through the `i2c_error_t` structure and are given routines to make it
+easier to set this.
+
+In addition, controllers are given a pair of routines to help deal with
+timeouts. Rather than causing every driver to implement its own set of
+timeouts, there are a pair of functions: `i2c_ctrl_timeout_count` and
+`i2c_ctrl_timeout_delay_us`. These each take the notion of a specific
+type of timeout, such as an abort timeout, an overall I/O timeout, a
+polling timeout, etc. and tell the driver how long that should be.
+
+This allows us to provide a means for per-controller overrides in the
+future without having to change the shape of the controller APIs itself.
+
+Examples of prototype I^2^C and SMBus controllers:
+
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/ctrl/pchsmbus/pchsmbus.c[Intel
+PCH (ICH) SMBus Controller]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/ctrl/dwi2c/dwi2c.c[Designware
+I^2^C Controller]
+
+To facilitate I/O there are pair of request structure that the
+controller use which are shared across the user I/O interfaces that are
+found in
+https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/sys/i2c/i2c.h[<sys/i2c/i2c.h>].
+There is the `smbus_req_t` and the `i2c_req_t`:
+
+----
+typedef struct smbus_req {
+	i2c_error_t smbr_error;
+	smbus_op_t smbr_op;
+	i2c_req_flags_t smbr_flags;
+	i2c_addr_t smbr_addr;
+	uint16_t smbr_wlen;
+	uint16_t smbr_rlen;
+	uint8_t smbr_cmd;
+	uint8_t smbr_wdata[I2C_REQ_MAX];
+	uint8_t smbr_rdata[I2C_REQ_MAX];
+} smbus_req_t;
+
+typedef struct i2c_req {
+	i2c_error_t ir_error;
+	i2c_req_flags_t ir_flags;
+	i2c_addr_t ir_addr;
+	uint16_t ir_wlen;
+	uint16_t ir_rlen;
+	uint8_t ir_wdata[I2C_REQ_MAX];
+	uint8_t ir_rdata[I2C_REQ_MAX];
+} i2c_req_t;
+----
+
+These structures have several common pieces:
+
+* They both have an embedded `i2c_errro_t` structure which is where error
+  and success information is placed.
+* They both take the `i2c_addr_t` structure which indicates both the
+  address type, which is either 7-bit or 10-bit, and the actual address
+  themselves.
+* They have similar flags structures which are used to indicate polling
+  and various SMBus 'quick' I/O behaviors.
+* They have buffers that are size to the frameworks current maximum of
+  256 bytes. Controllers will often support less then that. For most
+  SMBus 2.0 controllers (the most common form), there is a limit of 32
+  total bytes.
+
+There are a few differences:
+
+* The I^2^C structure always leverages the read and write length. The
+  SMBus structure is dependent on the actual type of request that is
+  going on.
+* The SMBus structure has a specific command register. SMBus controllers
+  are always issuing things in terms of a command. The support commands
+  are generally the same across the revision of SMBus the controller
+  supports. We have defined all commands through SMBus 3.0. Though we
+  currently only have drivers for SMBus 2.0 controllers.
+
+=== User Abstractions
+
+On the user side, the primary interfaces to dealing with `i2c` are the
+tool `i2cadm` and `libi2c`. The goal of `libi2c` is to provide a library
+interface that supports:
+
+* Discovering controllers, muxes, ports, and devices and basic
+  information about them.
+* Getting and setting properties on controllers.
+* Adding and removing devices under ports.
+* Performing I/O on a particular device or port. This supports both
+  general I^2^C I/O and SMBus style I/O.
+
+The general design of `libi2c` takes inspiration from `libnvme`. There
+is a top-level `i2c_hdl_t` that basically all other structures come from
+and a handle and its contents can only be used from a single thread at a
+time.
+
+`i2cadm`'s goal is to take all of these features and wrap them up in a
+CLI that provides a series of scoped sub-commands. All of the `list`
+entry points will have full libofmt style `-p` and `-o` style selectors
+and filters. The current set of commands in the work-in-progress looks
+like:
+
+----
+Usage: i2cadm <subcommand> <args> ... 
+
+        i2cadm controller list
+        i2cadm bus list
+        i2cadm bus scan [-d dev] <bus>
+        i2cadm device list
+        i2cadm device add [-c compat] [-t] bus[/port] name addr
+        i2cadm device remove [-t] bus[/port] address
+----
+
+There are additional commands to come such as performing I/O on devices
+and getting and setting controller properties.
+
+The bus scan API is used to discover devices on a bus. Scanning is a
+somewhat dangerous, but useful thing to support. There is no guaranteed
+way to determine if a device exists. The various strategies generally
+perform the start of a read-based I/O to see if a device will ACK an
+address. However, it's possible that this has side effects. In other
+operating systems, this is still present and is an important tool, but
+one with warnings.
+
+Here is the current style of output for a bus scan:
+
+----
+BRM42220071 # i2cadm bus scan dwi2c0/port0
+Device scan on dwi2c0/port0:
+
+        - = No Device    \o/ = Device Found
+        R = Reserved       S = Skipped
+        X = Timed Out    Err = Error
+
+ADDR    0x0 0x1 0x2 0x3 0x4 0x5 0x6 0x7 0x8 0x9 0xa 0xb 0xc 0xd 0xe 0xf
+0x00      R   R   R   R   R   R   R   R   -   -   -   -   -   -   -   -
+0x10      -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -
+0x20    \o/ \o/ \o/   - \o/ \o/ \o/   -   -   -   -   -   -   -   -   -
+0x30      -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -
+0x40      -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -
+0x50      -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -
+0x60      -   -   -   -   -   -   -   -   -   -   -   -   -   -   -   -
+0x70      -   -   -   -   -   -   -   -   R   R   R   R   R   R   R   R
+----
+
+== Implementation Scope
+
+The initial implementation, with a rather work-in-progress prototype can
+be found https://github.com/rmustacc/illumos-gate/tree/i2c-dev[here].
+The goal is to provide:
+
+* The core `i2cnex` kernel framework
+* A userland `i2cadm` command and `libi2c` library
+* `i2c` controller drivers for:
+** The designware I2C controller (found on AMD and many other systems)
+** The Intel PCH controller
+* Provide mux drivers for:
+** The LTC4305/6
+** The PCA954x family
+* Provide client drivers that cover a few classes of devices:
+** eeproms such as the EE1004 (DDR4) and AT24 family
+** GPIO controllers such as the PCA953x/PCA9506 and LTC4306
+** A few standard temperature sensors
+* Hopefully, a test suite with a fake controller to provide ways to test
+  drivers without hardware.
+
+=== Out of Scope
+
+The following items have been outlined and considered in the design, but
+are generally being left to be implemented based on need and/or
+community interest:
+
+* Broader support for 10-bit addresses. While there are provisions in
+  the initial commands, devinfo, and related to support this, this will
+  not be fully implemented until we have devices that support it or
+  pluimb it through the planned emulation devices and test suite.
+
+* Today there is no logic to fully reset a bus beyond a controller's
+  built-in support for aborting commands. We will likely need to more
+  fully implement something here.
+
+* I^3^C controller support. While I^3^C controller support is something
+  that we're going to want to add, the exact contours and new APIs that
+  we need need additional research and are left to the futrue.
+
+* Support for SMBus host notifications.
+
+* Proper stuck bus recovery.
+
+=== Future IPDs
+
+In addition to this, the following IPDs are planned to follow alongside
+this one:
+
+* An IPD to improve ACPI enumeration on i86pc. This is required for
+  enumerating the AMD I^2^C controllers properly outside of the Oxide
+  architecture.
+
+* The Kernel GPIO framework based on
+  https://rfd.shared.oxide.computer/rfd/0291[Oxide's experience] 
+
+* A framework for EEPROM devices to allow a shared abstraction for
+  accessing AT24 class devices as well as SFF transceivers, and various
+  JEDEC SPD devices,
+
+== Stability
+
+As this is a new set of interfaces, it's hard to know how well they are
+going to serve us and what issues we're going to hit. We recommend
+treating all of these as uncommitted for a period of 6-12 months to gain
+experience with them and at that point move towards making them
+committed interfaces, provided that enough experience has been gained to
+support that.
+
+== Open Questions
+
+These are open questions in the design that have not been fully figured
+out yet:
+
+* What is the shape of the `/dev/i2c` paths?
+* What are the exact APIs for discovering I^2^C / SMBus features and
+  maximums for client device drivers?
+* What are the exact property APIs? Do we want something more like kgpio
+  which allows a bunch of properties to be set in one go?

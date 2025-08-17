@@ -95,7 +95,7 @@ they call a repeated start condition, which allows the address and
 direction on the bus to change (though many controllers only support
 changing the direction). For example, if we wanted to read register 0x6
 from a device, one would begin with a start condition, putting the I^2^C
-address on the wire with a write bit, recive an ack, the controller
+address on the wire with a write bit, receive an ack, the controller
 would write the register value and wait for an ack from the device. At
 that point, it would put a repeated start sequence on the bus with the
 same I^2^C address, but using a read bit. Then the controller would
@@ -402,7 +402,7 @@ Let's look at an example that illustrates all of the major components:
     i2cnex@dwi2c2
       i2cnex@port0
         ltc4305@0,4a
-          i2cnex@ltc43060	
+          i2cnex@ltc43060
             i2cnex@1
               ee10004@0,50
             i2cnex@2
@@ -424,21 +424,23 @@ single port and there are multiple instances of the controller,
 sometimes the controller has more than one bus it can target, often with
 the help of an I/O mux.
 
-Under this we see our first **device**, `ltc4306@0,4a`. Let's take the
+Under this we see our first **device**, `ltc4305@0,4a`. Let's take the
 different components apart here:
 
-* `ltc4306` is the name of the device node.
+* `ltc4305` is the name of the device node. It is bound to the `ltc4306`
+  driver, which has an alias for `ltc4305`, `ltc4306`, `lltc,ltc4305`,
+  and `lltc,ltc4306`.
 * `0,4a` is the unit-address which corresponds to the device's I^2^C
   address. The general scheme here corresponds to the design of the
   `reg` property and is phrased as `<address type>,<address>`. Here `0`
   indicates a 7-bit address and `4a` is the address.
 
-The `ltc4305` is a **multiplexor** (and its cousin the `ltc4306` is that
-but also has a GPIO controller built in) that provides two distinct
-ports.  In this case the `ltc4306` driver would be attached to this
+The `ltc4305` is a 2-port **multiplexor**. Its sibling is the `ltc4306`
+which is a 4-port mux with a GPIO controller built in that the driver is
+named after.  In this case the `ltc4306` driver is attached to this
 device. That device leverages the <<kern-client>> related support to
 implement the <<kern-mux>>. Because it is a multiplexor, there is an
-instance of `i2cnex` to represet the mux itself. The unit address here
+instance of `i2cnex` to represent the mux itself. The unit address here
 is currently `ltc43060` which is the driver name combined with its
 intance.
 
@@ -733,10 +735,10 @@ A driver needs to implement the following basic APIs:
 * Required: a way to get properties. XXX This is not yet present.
 * Optional: a way to set properties. XXX This is not yet present.
 
-Controllers our guaranteed that their I/O function will only be called
-from one location. Controllers indicate errors for I/O operations
-through the `i2c_error_t` structure and are given routines to make it
-easier to set this.
+Controllers are guaranteed that their I/O function will not be called
+concurrently. Controllers indicate errors for I/O operations through the
+`i2c_error_t` structure and are given routines to make it easier to set
+this.
 
 In addition, controllers are given a pair of routines to help deal with
 timeouts. Rather than causing every driver to implement its own set of
@@ -755,11 +757,11 @@ PCH (ICH) SMBus Controller]
 * https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/ctrl/dwi2c/dwi2c.c[Designware
 I^2^C Controller]
 
-To facilitate I/O there are pair of request structure that the
-controller use which are shared across the user I/O interfaces that are
-found in
+There are a pair of I/O structures, the `smbus_req_t` and the
+`i2c_req_t` that are used to represent SMBus and I^2^C I/O requests
+respectively. These structures are used throughout the kernel I/O path
+and can be found in
 https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/sys/i2c/i2c.h[<sys/i2c/i2c.h>].
-There is the `smbus_req_t` and the `i2c_req_t`:
 
 ----
 typedef struct smbus_req {
@@ -907,7 +909,7 @@ community interest:
 * Broader support for 10-bit addresses. While there are provisions in
   the initial commands, devinfo, and related to support this, this will
   not be fully implemented until we have devices that support it or
-  pluimb it through the planned emulation devices and test suite.
+  plumb it through the planned emulation devices and test suite.
 
 * Today there is no logic to fully reset a bus beyond a controller's
   built-in support for aborting commands. We will likely need to more

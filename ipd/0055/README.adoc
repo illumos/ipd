@@ -138,7 +138,58 @@ E.g., `common/io/stream.c` lists 16B and 80B as entries within `dblk_sizes[]`; t
 An increase of 8B in `sizeof (dblk_t)` reduces the message buffers to 8B and 72B respectively.
 An increase of 16B (link:../0056/README.adoc[IPD 56]) leads to the loss of the first such `kmem_cache`, leaving 64B as the smallest message buffer size.
 
+== Prior Art
+
+Linux handles network packets using the `struct skbuff` type.
+Its documentation is <<skbuff, rendered here>> – the salient pieces are:
+
+* `mac_header`, `network_header`, `transport_header` and their `inner_` variants store the byte offsets for the start of L2/L3/L4 headers using `uint16_t`.
+The `mac_len` and `hdr_len` `uint16_t` fields serve a related purpose for the outer layers.
+Validity of the inner fields here is gated on bitflags such as `encapsulation`.
+* Outermost layers store their Ethertype in `protocol`, whereas some tunnel types may store either their Ethertype or IP Protocol.
+* `struct sk_buff` stores a flow hash, along with indication as to whether it was software computed.
+* Metadata is partially split into `struct skb_shared_info`, which includes `gso_size` and type.
+* Checksum state and offsets are kept and signalled similarly to `dblk_t`.
+* Other extension data (up to ~2KiB) can be allocated from a kmem cache and attached via a `struct skb_ext *` <<skb-ext>>.
+Cases where these fields are set are treated as being quite out of the ordinary, if the `unlikely()` annotations are any indication.
+
+Most importantly, the type is not really used for signalling between drivers in quite the way that STREAMS are, aside from where netlink sockets are used.
+It's a fairly large type accounting for the 48B `cb` field used as scratch space when a packet is moving through a layer.
+Otherwise the shape of things which live live in `struct sk_buff` are entirely geared towards the network datapath.
+A useful takeaway is that most of the fields we care about here are crucial enough to make it into the main body of `struct skbuff`.
+
+FreeBSD represents packets with the `struct mbuf` type.
+This type holds a `struct pkthdr`, which accounts for around 64B of metadata, including packet lengths and LSO information.
+Protocols don't appear to be directly included, but are rather indicated by the checksum flags.
+The type contains two layers of packet headers, storing L2/3/4/5 lengths as `uint8_t`s.
+
 == Future Developments
+
+Once this capability is part of the kernel, we will want upstream MAC/DLPI clients who generate or modify network packets to emit this information where possible.
+This includes:
+
+* `ip`
+  - `ip_xmit` can push L2 information when a fastpath NCE has been successfully negotiated.
+  - `tcp_send` can set L3/L4 information, as it is aware of the placement/lengths of both header sets.
+  - `udp_send` calls header prepend functions which can set L3/L4 information.
+    - In both cases, there's some responsibility to ensure that L4 information is correctly stripped when needed with fragmentation in play.
+  - `icmp_prepend_header_template` and related functions can set L3/L4 information.
+  - `conn_ip_output` (or the downstream send methods) can set L3 information, using `ip_xmit_attr_t` (fields `ixa_protocol`, `ixa_ip_hdr_length`).
+* `dls`/`mac` boundary
+  - `mac_header` could set L2 info during slowpath processing.
+* `overlay(7)`
+  - `overlay` plugins could, at the very least, set outer header lengths for pushed encapsulation.
+  - Particularly in light of IPD56, we could set both layers of packet info as OPTE does.
+  E.g., extract the header info on a packet ready to be transmitted, and then set both the tunnel layer and inner.
+
+SCTP has not really been discussed, since the `mac_ether_offload_info`/`mac_hw_emul` framework doesn't account for parsing the header class or emulating any offloads for the protocol.
+In principle we should be able to use this framework here without issue once supported by emulation – SCTP CRC offloads are common enough, and we would most likely consider only the common header for `l4hlen`.
+Linux also exposes a software-only kind of segmentation offloads here that we might want to plumb in future, where it segments the SCTP packet along chunk boundaries at the desired 'MSS' (chaining chunks via `struct sk_buff` to simplify iteration).
+
+This pattern also allows a driver to aid the Rx pathway, since MAC will be able to quickly sort a packet into a fastpath without needing to perform a full parse.
+There's value in including the RSS hash included with a packet on compatible NICs, but we will need to be able to signify that the hash has come from an unknown algorithm.
+Fanout for TCP packets matches each flow-key to the TCP squeue that that flow is bound to – thus, we cannot use the output of an arbitrary hash algorithm for this purpose.
+UDP/OTH fanout logic could benefit from having access to this, as could upstream devices like viona.
 
 Explicitly tracking a packet's structure allows us, at some point, to reconsider the role of partial checksums in the network stack.
 Given a fully parsed packet and today's checksum flags, we arguably have no need of `db_cksumstart`/`db_cksumend`/`db_cksumstuff`.
@@ -149,14 +200,24 @@ A more extreme proposal would use this as the basis for _removing_ partial check
 This would free up flags in the provider interface (and generally simplify logic throughout the stack).
 NICs which require a partial checksum would compute this themselves (using a `mac_provider` API) before transmission on the basis of the above parse data.
 
-== Open questions
+== Alternate directions
 
-* Should packet info live unconditionally within `dblk_t`?
-Would there be value in moving _all_ MAC-specific elements into a pointer, and filling this from a separate `kmem_cache`?
-How would we formalise that contract with callers of `allocb`?
-At what size does this pointer chasing outweigh the cost of a larger `dblk_t`, if at all?
+This proposal has packet info live unconditionally within `dblk_t`, and is similar in nature to FreeBSD and Linux's approaches of storing the state in the network packet type.
+A possibility is that we could move all MAC-specific elements behind a pointer (as is done for extension data in Linux's `sk_buff`), and fill it from a separate `mblk_t` cache.
+There are pros and cons to doing so.
+This would greatly limit the impact on other STREAMS consumers, but would also allow for a packet to point at on-thread-stack data rather than *needing* an allocation or to access a kmem cache.
+This does however greatly complicate the contracts of when packets should fill this information, how recipients should access it, and ensuring that any on-stack data is copied out if delivery becomes asynchronous (e.g., a packet is enqueued on a TX SRS or looped back into another squeue).
+Principally, the extra layer of indirection makes the use of these fields (getting, setting) within the datapath more expensive, which is at odds with our goals around network performance.
+Other Unices have decided that it's worth always paying the struct size cost here – but this is probably helped by the fact that their types are specialised for network packets first and foremost.
+There may still be value in keeping this as an option for certain classes of auxiliary data.
 
-* This allows a driver to aid the Rx pathway. Should we also make space for a packet's flow/RSS hash, to assist in fanout?
-Would we aim to include the hash type, included fields etc.? Are there other fields we might want to pull in here?
+Rather than forcing all information to be invalid on a boundary with MAC, an alternative approach would be to keep an additional `info_stale` flag within the packet data.
+When crossing a boundary, MAC sets this flag, and a direct use of `mac_ether_offload_info` results in a full parse.
+If a client wishes to make use of this info it can clear this flag, but in turn becomes responsible for either readding the flag, clearing the state, or ensuring the state is correct for the next recipient.
+Readding the flag may be done at any time, allowing e.g. `ip` to be audited in a piecemeal way for any `mblk_t` reuse.
 
-* How best should we detect, triage, and tackle clients such as ICMP which reuse `mblk_t` entries for reply packets? Would a https://code.oxide.computer/c/illumos-gate/+/485/comment/dbadd441_1725d5fa/[stale info flag] suffice here?
+[bibliography]
+== External References
+
+- [[[skbuff]]] https://docs.kernel.org/networking/kapi.html#c.sk_buff
+- [[[skb-ext]]] F. Westphal, 2019. SKB Metadata Extensions https://strlen.de/talks/skb_ext_slides.pdf

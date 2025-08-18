@@ -308,9 +308,22 @@ In our implementation, we have made the `mac_tx` check on required offloads http
 By storing parse data for tunneled frames in the `dblk_t`, we can afford to do so as the cost of extracting the inner ULP info is minimised.
 This allows for tunnel devices to unconditionally advertise capabilities to upstream clients without conditionally determining whether they themselves should conditionally perform emulation.
 
+== Future Developments
+
+`overlay` would be a prime in-kernel candidate for making use of this functionality, particularly given that our implementation supports advertising and emulation of CSO/LSO over VXLAN.
+Given that it is not immediately clear which interface will be used for a tunnelled packet, it may be best for `overlay` VXLAN devices to unconditionally advertise CSO/LSO if configured to do so.
+If a packet is then sent out an incompatible interface, illumos would be responsible for offload emulation.
+It's assumed with IPD 55 in use that `overlay` would also set the full range of packet information.
+
+Related tunnel classes like IP-in-IP (`iptun`) are often also supported by NICs, in addition to the UDP tunnels we've implemented so far.
+Supporting these would require that we allow for different packet structures within the packet parsing logic we have today (namely, accounting for the lack of an inner L2 header in this case).
+Linux expresses support for segmentation offloads in these cases via `SKB_GSO_IPXIP4` and `SKB_GSO_IPXIP6`, which are supported alongside checksum offlaods by NICs like the Intel X710, so it's worth making room for in the limit.
+This could likely be an additional tunnel type in the current framework.
+
 == Open Questions
 
 * The assumption made here is that a device supports all of its tunnel types identically.
+That is a NIC which supports Geneve, VXLAN, and IP-in-IP offers the same offloads to all inner ULPs.
 Are there any known devices which would break this expectation?
 
 [bibliography]

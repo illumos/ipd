@@ -31,6 +31,7 @@ for quite some time
 * A device driver framework for I^2^C muxes:
 ** Initial support for the PCA9545 and LTC4302/6 families
 * A device driver framework for I^2^C devices and register access
+** Initial support for various EEPROM, GPIO, and sensor drivers
 
 == Background
 
@@ -677,6 +678,14 @@ Examples of prototype client drivers:
 
 * https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/eeprom/ee1004/ee1004.c[EE1004
 EEPROM Driver (DDR4 SPD)]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/eeprom/spd511x/spd511x.c[SPD5118
+EEPROM and Sensor Driver (DDR5 Hub)]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/ts511x/ts511x.c[TX511x
+and TS521x Temp Sensor (DDR5)]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/lm7x/lm7x.c[LM75,
+LM76, and LM77 temp sensor]
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/tmp43x/tmp43x.c[TMP401,
+TMP411, TMP43x temp sensor]
 * https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/gpio/pca953x/pca953x.c[PCA953x
 Family GPIO Controller]
 * https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/pca954x/pca954x.c[PCA954x
@@ -894,9 +903,10 @@ The goal is to provide:
 ** The LTC4305/6
 ** The PCA954x family
 * Provide client drivers that cover a few classes of devices:
-** eeproms such as the EE1004 (DDR4) and AT24 family
+** eeproms such as the EE1004 (DDR4), SPD5118 (DDR5) and AT24 family
 ** GPIO controllers such as the PCA953x/PCA9506 and LTC4306
-** A few standard temperature sensors
+** A few standard temperature sensors such as the LM75, TMP43x, and
+TSE511x/TSE521x (DDR5)
 * Hopefully, a test suite with a fake controller to provide ways to test
   drivers without hardware.
 

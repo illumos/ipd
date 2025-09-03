@@ -676,17 +676,17 @@ and the kernel will generate errors for that as well.
 
 Examples of prototype client drivers:
 
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/eeprom/ee1004/ee1004.c[EE1004
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/eeprom/ee1004/ee1004.c[EE1004
 EEPROM Driver (DDR4 SPD)]
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/eeprom/spd511x/spd511x.c[SPD5118
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/eeprom/spd511x/spd511x.c[SPD5118
 EEPROM and Sensor Driver (DDR5 Hub)]
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/ts511x/ts511x.c[TX511x
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/sensor/ts511x/ts511x.c[TX511x
 and TS521x Temp Sensor (DDR5)]
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/lm7x/lm7x.c[LM75,
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/sensor/lm7x/lm7x.c[LM75,
 LM76, and LM77 temp sensor]
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/sensor/tmp43x/tmp43x.c[TMP401,
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/sensor/tmp43x/tmp43x.c[TMP401,
 TMP411, TMP43x temp sensor]
-* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/dev/gpio/pca953x/pca953x.c[PCA953x
+* https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/gpio/pca953x/pca953x.c[PCA953x
 Family GPIO Controller]
 * https://github.com/rmustacc/illumos-gate/blob/i2c-dev/usr/src/uts/common/io/i2c/mux/pca954x/pca954x.c[PCA954x
 family Mux]
@@ -929,7 +929,10 @@ community interest:
   that we're going to want to add, the exact contours and new APIs that
   we need need additional research and are left to the futrue.
 
-* Support for SMBus host notifications.
+* Support for SMBus host notifications and non-I^2^C block reads. SMBus
+  block reads require a device to send the numbe of bytes that are
+  present in its reply. Our initial testing does not have devices that
+  support that, therefore this will not be plumbed through userland.
 
 * Proper stuck bus recovery.
 

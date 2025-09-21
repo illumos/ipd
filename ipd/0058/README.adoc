@@ -1,0 +1,207 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Robrt Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 58 EEPROM Device Framework
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+This IPD proposes a small driver framework, `eedev`, in the spirit of
+`blkdev` to provide character device operations for EEPROMs. This is
+primarily motivated by I^2^C-based EEPROMs based on the work in
+https://github.com/illumos/ipd/blob/master/ipd/0057/README.adoc[IPD 57
+I2C Framework].
+
+== Motivation
+
+EEPROMs are small devices found across a wide variety of larger devices
+ranging from DIMM modules to PCBAs for FRUs and can even be found
+containing configuration information for NICs, PCIe hotplug (via
+Universal Backplane Management), and more. Due to their bye-addressable
+nature, the natural interface for these devices is a classic character
+device where you can easily call open(2), read(2), write(2), and
+lseek(2). However, these devices all have their own quirks based on how
+the data is laid out internally.
+
+Let's look at a device like the AT24C32. The AT24C32 is a 4 KiB device
+that has a 12-bit address, each address contains a single byte of data.
+The device is organized in terms of 32-byte pages. When reading from the
+device, you can start at any address and perform a sequential read. If
+you exceed the capacity of the device, it will read from the start
+again.
+
+However, you can only write to one page of the device at a time.  If you
+start in the middle of a page and write more bytes than fit in the
+32-byte page, the device will instead write to the start of the page. A
+page naturally begins at address 0x40 in the device. If you write at
+0x40, you can write a full 32 bytes without any issues. If however you
+were to start at 0x5e, there would only be two bytes remaining in the
+page, so you'd only want to send two bytes to the device and then begin
+another write starting in the next page.
+
+Particularly for I^2^C based EEPROMs like DDR4 and DDR5 devices or the
+EEPROMs found in optical transceivers, the transport interface is
+limited to only being able to a 1-byte address. As such, these devices
+instead have a way of changing which of several pages is active. For
+example, the DDR5 SPD/Hub uses the bottom 128 bytes for various control
+information and the upper 128 bytes can be paged through to read the
+full 1 KiB of data that is contained inside of it. This imposes a
+constraint that reads cannot cross a page boundary.
+
+Finally, some of the AT24C devices actually use multiple I^2^C
+addresses, which means that their reads also cannot cross certain
+boundaries.
+
+This logic is important, but somewhat tedious. We'd rather get it right
+a single time. Another area of the system that handles these different
+sizing and segmentation pieces is the DMA subsystem. In particular, the
+https://illumos.org/man/9S/ddi_dma_attr[`ddi_dma_attr_t(9S)`] structure
+takes basic specifications, simplifying the act of all driver writers
+from having to manually take this into account when performing memory
+allocations. We want to have something similar for this framework.
+
+Unrelated to the device side, we have the actual DDI side. There are two
+main motivators for a framework from the DDI side:
+
+. Having a single implementation of all of the character device
+operations simplifies the individual driver and doesn't encroach on
+their minor number space.
+. We are able to have more uniform behavior across different devices
+making the user experience more consistent and allowing us to only
+implement certain features a single time.
+
+== Design Sketch
+
+On the kernel side, the `eedev` module will be a loadable device driver
+that is a child of `pseudo`. It will define a single instance that will
+be force attached by the system to ensure that any eedev providers are
+present. The device will expose a single minor node character device per
+registration.
+
+The registration format defines several different pieces of information:
+
+* A registration version.
+* The capacity of the device.
+* The segmentation of the device. This takes care of the various page
+  splits that have been described above.
+* A read and write granularity. This describes how many bytes per
+  address are in the device.
+* A maximum read and write size. This describes how many bytes the
+  device is willing to read and write in a single go. This may be
+  limited by the transport interface and not the device directly.
+* A flag that indicates whether it is read-only or not.
+* An optional name for the device. By default, these will be called
+  `eeprom` and a device does not have to change this unless there is
+  more than one instance per device.
+* An operations vector with functions to read and write data to the
+  device.
+
+Reads and writes are phrased in terms of the `uio_t` and then drivers
+are given a page number, a page offset, and a number of bytes. The page
+is automatically determined based on the device segmentation. The number
+of bytes will be adjusted to ensure it doesn't exceed any maximum or go
+beyond a page boundary.
+
+Driver's that implement the edev interface only need a basic dev_ops
+structure, they do not need a cb_ops for the corresponding eeprom,
+allowing them to do what they need there. Instead, the `eedev` module
+will ensure that the module is loaded and present as part of any opens.
+This takes care of the own downside of automatic unloading and loading
+based on /devices paths. When someone opens a minor node corresponding
+to an eeprom, that minor node will ensure the provider driver is loaded
+and held. Such holds will persist until the final close() occurs. This
+has the implication that it's only the first open() that's required to
+make sure that this is present.
+
+=== User Paths
+
+To support user discoverability, we will add a `/dev/eeprom`
+subdirectory structure that is powered by the existing `devfsadm`
+plugins. We opt not to make this an sdev dynamic plugin and use the
+existing functionality as it ties in easily to minor node creation and
+destruction. The directory structure will be organized as:
+
+----
+/dev/eeprom/<driver>/<instance>/<devices>
+----
+
+So using the at24c example, we would see something like
+`/dev/eeprom/at24c/0/eeprom`. On a DDR4 system with 16 instance of
+`ee1004`, one per DIMM, we see something that looks like:
+
+----
+# ls -l /dev/eeprom/ee1004/*/eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/0/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:0:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/1/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:1:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/10/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:10:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/11/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:11:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/12/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:12:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/13/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:13:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/14/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:14:eeprom
+lrwxrwxrwx   1 root     root          51 Dec 28 20:25 /dev/eeprom/ee1004/15/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:15:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/2/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:2:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/3/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:3:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/4/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:4:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/5/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:5:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 00:01 /dev/eeprom/ee1004/6/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:6:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 20:25 /dev/eeprom/ee1004/7/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:7:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 20:25 /dev/eeprom/ee1004/8/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:8:eeprom
+lrwxrwxrwx   1 root     root          50 Dec 28 20:25 /dev/eeprom/ee1004/9/eeprom -> ../../../../devices/pseudo/eedev@0:ee1004:9:eeprom
+----
+
+The ability to open any device backed by this today requires
+`PRIV_SYS_DEVICES`. If this is too broader, we can evaluate a specific
+privilege for this class of device.
+
+One important other piece here, reads and writes will return shorter
+than requested if they are not properly aligned or exceed the size of a
+given page. In the future, if applications would like to discover this
+information, then we should add a few standard ioctls to the device
+class to convey this information.
+
+Devices will all populate the `Size` property, which is a 64-bit
+property. The system will use this when filling out information such as
+stat calls or determining related properties.
+
+== Implementation Scope
+
+The initial implementation is being done in concert with work in
+https://github.com/illumos/ipd/blob/master/ipd/0057/README.adoc[IPD 57
+I2C Framework] and includes the following:
+
+* A kernel `eedev(4D)` driver that provides read and write access to
+  devices through a standard character device interface.
+* A kernel framework that allows device drivers to instantiate EEPROM
+  character devices.
+* `devfsadm` support for a `/dev/eeprom` directory structure.
+* Read-only consumers in the form of DDR4 and DDR5 EEPROMs.
+* Read-write consumers in the form of the AT24C series devices.
+
+=== Out of Scope
+
+The following features are currently out of scope in the initial
+integration:
+
+* Support for `FEXCL`-based exclusive opens and ioctl-based locking.
+* Discovering device granularity and other features in userland.
+* Integration with security features to permanently write-protect
+  regions of the EEPROM.
+* A user command such as `eepromadm` to list and manipulate devices and
+  their security features.
+
+== Stability
+
+We currently propose that the `eedev` interface be kept private to
+illumos. As time goes on and we have more experience we can look to
+moving it to a committed interface.

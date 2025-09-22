@@ -4,7 +4,7 @@
 :icons: font
 :state: draft
 :revremark: State: {state}
-:authors: Robrt Mustacchi <rm@fingolfin.org>
+:authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor:
 
 = IPD 58 EEPROM Device Framework
@@ -28,7 +28,7 @@ I2C Framework].
 EEPROMs are small devices found across a wide variety of larger devices
 ranging from DIMM modules to PCBAs for FRUs and can even be found
 containing configuration information for NICs, PCIe hotplug (via
-Universal Backplane Management), and more. Due to their bye-addressable
+Universal Backplane Management), and more. Due to their byte-addressable
 nature, the natural interface for these devices is a classic character
 device where you can easily call open(2), read(2), write(2), and
 lseek(2). However, these devices all have their own quirks based on how
@@ -161,7 +161,7 @@ lrwxrwxrwx   1 root     root          50 Dec 28 20:25 /dev/eeprom/ee1004/9/eepro
 ----
 
 The ability to open any device backed by this today requires
-`PRIV_SYS_DEVICES`. If this is too broader, we can evaluate a specific
+`PRIV_SYS_DEVICES`. If this is too broad, we can evaluate a specific
 privilege for this class of device.
 
 One important other piece here, reads and writes will return shorter

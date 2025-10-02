@@ -2,10 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
-:sponsor:
+:sponsor: Dan McDonald <danmcd@edgecast.io>
 
 = IPD 57 I2C Framework
 {authors}

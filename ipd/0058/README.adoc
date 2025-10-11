@@ -2,10 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
-:sponsor:
+:sponsor: Joshua M. Clulow <josh@sysmgr.org>
 
 = IPD 58 EEPROM Device Framework
 {authors}

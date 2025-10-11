@@ -69,7 +69,7 @@ information is available at the end of this document.
 | draft     | [IPD 55 Placing More Packet Info Into `dblk_t`](./ipd/0055/README.adoc)
 | draft     | [IPD 56 Supporting Tunnel-Aware Offloads](./ipd/0056/README.adoc)
 | published | [IPD 57 I2C Framework](./ipd/0057/README.adoc)
-| draft     | [IPD 58 EEPROM Device Framework](./ipd/0058/README.adoc)
+| published | [IPD 58 EEPROM Device Framework](./ipd/0058/README.adoc)
 
 ## Contributing
 

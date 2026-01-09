@@ -62,6 +62,10 @@ The publishing schedule would resemble something like this:
 
 image::img/schedule.svg[alt="sysroot release schedule, showing 3-year lookback from publication year",role=half-width]
 
+Only instruction set architectures supported by the illumos project are in
+scope for sysroot generation and publishing.  Currently, that policy would mean
+only an i386/amd64 sysroot will be published.
+
 === Contents
 
 The contents of the generated sysroot will be chosen according to the Makefiles

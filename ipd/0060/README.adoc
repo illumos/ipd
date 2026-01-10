@@ -1,0 +1,360 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 60 Generalized Regspecs, PCIe Segments, and ACPI Root Nexus
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+This IPD goes into changes we'd like to make to allow for a broader set
+of register specifications which will be enabled first and foremost
+through an improved ACPI root nexus. This will:
+
+* Allow us to better enumerate devices on x86 and ARM platforms that are
+  only discoverable via ACPI.
+* Make it easier for platforms to have platform-specific register
+  specifications.
+* Make it easier for us to share drivers that can be found across
+  different types of busses and propagating information back up through
+  the DDI.
+* Provide some means of evolving pieces of the system that have changed
+  where we don't want to impact leaf device drivers such as the fact
+  that PCI commonly now wants to include information about a segment in
+  configuration space.
+
+== Background
+
+At the core of the device model that we have is the `reg[]` and
+`assigned-adresses[]` properties. These properties describe how a
+particular instance of a device should find its registers and then where
+they have been mapped to by the kernel. Most of the time, the particular
+values are transparent to a device driver as each instance will have
+different values. For example, two different igb(4D) NICs will not have
+the same set of registers. The driver doesn't care about this and the
+DDI takes care of mapping the right actual physical registers for the
+device.
+
+These properties were originally specified by OpenFirmware and have been
+inherited by the flattened device tree framework that is found on ARM,
+RISC-V, and related systems. Critically, the interpretation is not
+global. Rather, the shape and interpretation of the `reg[]` array is a
+contract between a parent and its children and can change as you go up
+the tree.
+
+To help make this clear, let's look at an example: the structure that
+is used for PCI and PCI Express devices.
+
+----
+struct pci_phys_spec {
+        uint_t pci_phys_hi;             /* child's address, hi word */
+        uint_t pci_phys_mid;            /* child's address, middle word */
+        uint_t pci_phys_low;            /* child's address, low word */
+        uint_t pci_size_hi;             /* high word of size field */
+        uint_t pci_size_low;            /* low word of size field */
+};
+----
+
+The `reg[]` array is an integer array and for PCI(e) every 5 bytes is
+represented by the above structure and PCI(e) parents always promise
+that this structure will come in those multiples. There is one `struct
+pci_phys_spec` for each PCI BAR and one that represents the
+configuration space accesses (by bus, device, and function). The
+`pci_phys_hi` cell contains metadata about the actual type of accesses
+such as whether this is refers to I/O space or memory space.
+
+The next two `uint_t` values are combined to define the 64-bit address
+that the mapping can be found at. In `reg[]` this will generally be
+zero; however, in `assigned-addresses[]` this generally has a physical
+address where the BAR has been mapped for memory based BARs and the base
+I/O port for I/O ranges.
+
+Finally, the last two members define the size of the memory region in
+bytes.
+
+These structures are defined by the parent when it creates the child. So
+for PCI Express, this is generally done by the `pcieb` driver, which is
+the parent of all PCIe devices or the corresponding nexus driver that
+represents the start of a PCIe or PCI bus (e.g. `npe`). When mapping a
+set of registers, the information from this structure is either referred
+to by its index or based on its information in a mapping request. The
+information that is passed up through parents all the way to the place
+the mapping takes place (generally the root nexus) will **change**.
+
+Internally the system often uses the `struct regspec` which is meant to
+be internal to the DDI. It was originally defined in 32-bit values and
+then we added a variant that supported 64-bit values:
+
+----
+struct regspec {
+        uint_t regspec_bustype;         /* cookie for bus type it's on */
+        uint_t regspec_addr;            /* address of reg relative to bus */
+        uint_t regspec_size;            /* size of this register set */
+};
+
+struct regspec64 {
+        uint64_t regspec_bustype;       /* cookie for bus type it's on */
+        uint64_t regspec_addr;          /* address of reg relative to bus */
+        uint64_t regspec_size;          /* size of this register set */
+};
+----
+
+The bus types are generally again, kept as a contract between the parent
+and children. For example, the i86pc ISA driver has its own types for
+memory and I/O. These definitions are similarly mimicked by PCIe. The
+same is true in bits of our ACPI parsing logic today.
+
+This works to some extent; however, there are buses that today aren't
+represented, for example, the AMD System Management Network, I^2^C and
+SPI devices, etc. Now, not all of these per se would end up making it to
+the root nexus (I^2^C and SPI); however, we would want the AMD SMN
+network to make it further up there.
+
+It's worth noting that the `regspec64` was intended to some day fully
+replace the `regspec`, but even that has some limitations in the face of
+some of the other things that we want to do. This IPD will get into
+where we want to go in the specific proposals.
+
+=== PCI Segments
+
+Traditionally, PCI devices have been referred to by a combination of the
+PCI bus, device, and function. These three concepts are part of how you
+identify things uniquely on the bus for PCI and PCIe and are part of the
+physical layer. This is a 16-bit quantity with an 8-bit bus, 5-bit
+device, and 3-bit function. By definition, functions are part of a
+single device.
+
+In addition, PCIe adds additional constraints. Everything in PCIe is a
+serial link and PCIe bridges have multiple notions of transactions. Some
+of these kinds and the way that things have worked from PCI times
+require that each device downstream of a port ends up with a unique
+PCI bus assigned to it and that it generally be referred to as device 0.
+
+This, combined with the fundamental limit of 256 PCI bus IDs ends up
+limiting a system. To deal with this, PCIe added the notion of a
+segment. A segment is a logical concept that divides up parts of the
+PCIe hierarchy. With the introduction of PCIe 6.0 in particular, this is
+much more prevalent and a part of different transactions on the bus.
+
+The relevant part of this for this IPD is the fact the CPU has to know
+about PCI segments and which root ports or root complexes are on what
+segments. In particular, this changes the address that is used to map
+configuration space. However, our `pci_regspec` can no longer really be
+modified to account for this, meaning that there will have to be some
+additional metadata and thoughts about how we communicate this and store
+this in the system. This motivates the ability to further expand PCIe
+mappings along with other bus types and address spaces.
+
+=== ACPI Enumeration
+
+On PCs, ACPI is used as a way to enumerate devices. Some of these
+devices that APCI describes are devices that can be discovered without
+ACPI. For example, PCIe devices. Others; however, are used to encode
+information that is specific to the platform much in a way that the PROM
+on SPARC did or a flattened device tree. Examples of these devices
+include memory-mapped GPIO controllers, I^2^C controllers, I^3^C
+controllers, I/O muxes, SPI controllers, etc. The tricky thing here is
+that not all of these devices are exclusively enumerated by ACPI.
+
+Today, the APCI nexus driver does not really serve as a full nexus
+driver for some of these devices. This means, for example, there is no
+way on a PC to enumerate the AMD GPIO controller or I^2^C controller.
+This gets a bit more complicated when you realize that the I^2^C
+controller that it has, which is basically a standard DesignWare device
+that may also be enumerated in a different way on device tree based
+systems and can even sometimes be a PCI device!
+
+For both i86pc and ARM, we need to improve this situation. Similarly, we
+also need a way to translate resources to our standard models, so this
+is a time to take a look at what we do and improve upon it as the
+existing code only covers ISA class devices.
+
+== New Register Specification
+
+A register specification is a contract between a parent and its child.
+We need a new register specification that can go all the way up to the
+root nexus. First, it will help to discuss what the information is that
+we need.
+
+=== Common Resource Types
+
+MEMORY::
+
+This is the most common form of mapping that exists. Memory mapping
+requests require:
+* The address of the mapping (generally physically, but potentially
+  virtual with an IOMMU)
+* The length of the mapping. Traditionally in bytes.
+
+IO PORTS::
+
+I/O ports are a simple resource that we need to "map" which is similar
+to memory. They consist of:
+
+* A base port
+* A number of ports
+
+AMD SYSTEM MANAGEMENT NETWORK::
+
+The AMD SMN (system management network) has a series of different
+regions of memory that correspond to peripherals. Generally there are 1
+MiB regions that map to a device and a region inside that device.
+Registers in these are referred to generally by:
++
+--
+. A unit type, e.g. a PCIe port, I2C controller, the thermal controller,
+etc.
+. A unit number which identifies which unit it is of that type
+. A register in that unit.
+--
++
+However, when we think about a mapping we often think of this as:
+
+* A base address in SMN space (which is generally computed from a unit
+type and its unit number)
+* A length that represents which registers we want to be able to access
+
+PCI BASE ADDRESS REGISTERS::
+
+PCI base address registers come in two primary forms: I/O ports and
+memory. Mappings of these generally require the same two elements that
+everything else does:
++
+--
+* A base address
+* A length
+--
++
+PCI(e) drivers generally don't need to think this way and instead just
+refer to the general reg[] array index that they want to use when
+calling `ddi_regs_map_setup(9F)`.
+
+PCI CONFIGURATION SPACE::
+
+PCI Configuration Space mappings and accesses are identified by the
+following generally:
++
+--
+* The PCI Segment (not a historical part of the pci_regspec_t)
+* The PCI Bus
+* The PCI Device
+* The PCI Function
+--
++
+The valid length of accesses depends on the device type and is generally
+a fixed item. PCI devices have 256 bytes of configuration space while
+PCIe devices have 4 KiB. Generally a raw memory mapping is not provided
+but routines like `pci_config_setup(9F)` and pci_config_get8(9F)`.
+
+While this isn't something that we handle as well today, PCI buses can
+be dynamically allocated and reassigned. This generally comes up more
+often in the `ranges[]` properties and related for parents and can
+sometimes be managed by the `ndi_ra_alloc()` and `ndi_ra_free()`
+routines. While the ra routines may need adjustments to handle these
+other resource types and things that aren't always common address and
+length pairs. That will be left to future work based on folks plumbing
+things through other nexus drivers that need it.
+
+=== ACPI Resource Types
+
+ACPI provides several other types of resources. These include items like
+GPIOs, I^2^C addresses, SPI devices, etc. These devices, particularly
+I^2^C and GPIOs should be thought of more like USB devices in so far as
+I/O to them is inherently fallible and we want to think of it that way
+as a first-class function. While PCIe and SMN I/O can classically fail
+with an all 1s read when there is no device or the device returned, the
+tapestry of information we can get for these other devices is much
+larger. This means that leveraging the standard `ddi_get32(9F)` or
+`ddi_put32(9F)` families for these functions doesn't make as much sense.
+
+Notably, if you go through the ACPI `_CRS` information, there are
+generally many more fields for some of the different resource types than
+we mentioned. For example, there is some alignment and minimum address
+constraints for certain resources types that are non-fixed. We don't
+need to represent that information here as the point is that the parent
+nexus drivers will use this information to perform any address
+allocations that are required and can pass that down.
+
+This IPD does not propose we include information for them; however, it's
+important that we have the ability to extend this regspec. That's the
+whole purpose of this.
+
+=== regspec details
+
+XXX
+
+== Handling PCI Segments
+
+PCI segment granularity can vary on the system. However, all devices
+that are downstream of a root port are required to be on the same
+segment. Following on this ACPI has the `_SEG` method which is an
+optional method. If the segment is not present then a device is assumed
+to be on segment 0.
+
+All root ports would have a new `int` property: `pci-segment`. The
+platform would be required to provide a means of mapping this through a
+new `pci_prd.h` function. When the kernel enumerates downstream PCI
+devices through hotplug or boot configuration, this property would be
+**inherited**. This would not be required for driver operation, but is
+there in case they would like it and simplifies the implementation of
+tooling like `pcieadm` which evaluates things based on the b/d/f. If a
+sgment is not specified there, segment 0 is assumed.
+
+All of our drivers have the existing `pci_regspec_t`. This is baked in
+across a lot of things that we don't wnat to touch and a lot of
+software. Because segments are applied at root ports, it would be up to
+the PCIe nexus drivers like `npe` to look for the property and translate
+the reg spec from the `pci_regspec_t` above to the appropriate form for
+the new version that we have described.
+
+While x86 systems have rather straightforward mappings for these, the
+same is not always true on ARM. This is part of the reason that we want
+to have a newer form of the `pci_regspec_t` above.
+
+== ACPI Nexus
+
+As we discussed in the background section, there are devices that may be
+enumerated in several different ways. As a result, we don't want to
+enumerate them a second-time under the ACPI root nexus. However, there
+are many devices that should be plumbed through on a per-platform basis.
+
+The general approach that we propose taking here is something somewhat
+similar to the existing table of `isapnp_descs[]`. This IPD does not
+currently propose touching this table; however, things may be combined
+if it seems pertinent during development. Effectively, we want an allow
+list with the following properties:
+
+* Devices that are not listed are not included
+* The device node's compatible ID will be set based on combinations of
+  `_HID` and `_CID`.
+* Devices will not have their node rewritten and will generally use a
+  combination of the `_HID` to determine the device name and `_ADR` to
+  determine the bus address.
+* There will be a function to allow translation between various ACPI
+  properties and equivalent well-known device tree properties so that
+  way the leaf drivers can remain the same regardless of who the parent
+  is.
+* These devices will use the new generalized regspec as a way to
+  communicate information back up the bus.
+
+In particular, as part of this change we anticipate allowing through
+several of the AMD and Intel defined devices such as:
+
+* `AMDI0010`: I^2^C device
+* `AMDI0015`: I^3^C device
+* `AMDI0030`: GPIO controller
+
+The I^2^C and GPIO driver will allow us to upstream these drivers that
+have been Oxide-only due to our lack of ACPI dependency. This also
+allows the foundation for more easily binding to the Intel system GPIO
+controllers and helps on ARM as well.

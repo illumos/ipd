@@ -70,6 +70,7 @@ information is available at the end of this document.
 | draft     | [IPD 56 Supporting Tunnel-Aware Offloads](./ipd/0056/README.adoc)
 | published | [IPD 57 I2C Framework](./ipd/0057/README.adoc)
 | published | [IPD 58 EEPROM Device Framework](./ipd/0058/README.adoc)
+| predraft | [IPD 60 Generalized Regspecs, PCIe Segments, and ACPI Root Nexus](./ipd/0060/README.adoc)
 
 ## Contributing
 

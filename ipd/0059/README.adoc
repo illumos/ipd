@@ -32,7 +32,7 @@ In order to make illumos an officially supported platform for the Rust language
 and toolchain, a <<sysroot-20181213-v1,sysroot>> was created to support
 cross-compilation from a Linux environment.  As recorded in the release notes,
 that sysroot used a commit chosen to align with LTS releases from 2 years prior
-in OmniOSCE, OpenIndiana, and SmartOS to ensure that binaries built against it
+in OmniOS, OpenIndiana, and SmartOS to ensure that binaries built against it
 would be supported on most existing installs.
 
 That version of the sysroot has continued to be used by the Rust
@@ -54,8 +54,8 @@ system, a new sysroot will be generated and published annually.  It will be
 built from a commit dating 3 years prior.  For release year `Y`, the most
 recent commit before 1 May of `Y - 3` will be selected from which to perform
 the build.  This coincides with the
-<<omniosce-release-schedule,OmniOSCE release schedule>>, and should cover both
-the oldest supported LTS release from OmniOSCE, as well as the SmartOS LTS
+<<omnios-release-schedule,OmniOS release schedule>>, and should cover both
+the oldest supported LTS release from OmniOS, as well as the SmartOS LTS
 release against which illumos pkgsrc is built.
 
 The publishing schedule would resemble something like this:
@@ -65,6 +65,9 @@ image::img/schedule.svg[alt="sysroot release schedule, showing 3-year lookback f
 Only instruction set architectures supported by the illumos project are in
 scope for sysroot generation and publishing.  Currently, that policy would mean
 only an i386/amd64 sysroot will be published.
+
+Responsibility for the creation and publishing of sysroots will reside with the
+Core Team.
 
 === Contents
 
@@ -110,9 +113,9 @@ CommitDate: Fri Apr 29 21:43:44 2022 +0000
 +
 NOTE: It is the commit date, not the author date, which is considered for the
 cut-off here, as it corresponds to when the change was integrated.
-2. Select the OmniOSCE LTS version that was supported at the time of the
+2. Select the OmniOS LTS version that was supported at the time of the
    commit. In this case r151038.
-3. On a system with the specified OmniOSCE version installed, build
+3. On a system with the specified OmniOS version installed, build
    illumos-gate from the selected commit
 4. Preserve the env file used for the build, committing it as
    `env/illumos.YYYYMMDD.sh` in the <<sysroot-repo,sysroot>> repository so that
@@ -133,7 +136,6 @@ $ make archive ILLUMOS_PKGREPO=<path-to-repo-built-from-commit>
 
 == Open Questions
 
-* Who is responsible for initiating the annual sysroot creation process?
 * When should the creation take place?  Is "in May" adequately prescriptive?
 * If there are substantial changes to the OS which align poorly with the
   proposed sysroot schedule, would we consider creating one "off-cycle" (but
@@ -150,6 +152,6 @@ $ make archive ILLUMOS_PKGREPO=<path-to-repo-built-from-commit>
 
 * [[sysroot-20181213-v1]]https://github.com/illumos/sysroot/releases/tag/20181213-de6af22ae73b-v1[illumos sysroot release 20181213-v1 (de6af22ae73b)]
 * [[rust-docker-script]]https://github.com/rust-lang/rust/blob/d9617c8d9a55773a96b61ba3a4acb107d65615c1/src/ci/docker/scripts/illumos-toolchain.sh[Rust CI illumos toolchain script (illumos-toolchain.sh)]
-* [[omniosce-release-schedule]]https://omnios.org/schedule[OmniOSCE release schedule]
+* [[omnios-release-schedule]]https://omnios.org/schedule[OmniOS release schedule]
 * [[sysroot-repo]]https://github.com/illumos/sysroot[illumos Sysroot Repository]
 * [[illumos-17765]]https://www.illumos.org/issues/17765[illumos Issue #17765 - assert.h checks post-17491 are bad for C++]

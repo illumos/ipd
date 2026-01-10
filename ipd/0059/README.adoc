@@ -58,6 +58,13 @@ the build.  This coincides with the
 the oldest supported LTS release from OmniOS, as well as the SmartOS LTS
 release against which illumos pkgsrc is built.
 
+The selection of `Y - 3` as the window of time for which a sysroot will
+maintain backwards compatibility is an policy choice, attempting to balance the
+tension of supporting users with systems of varying ages, while still exposing
+changes to the OS in a somewhat timely manner.  Its coincidence with the OmniOS
+release schedule is for convenience, rather than any explicit statement of
+support.
+
 The publishing schedule would resemble something like this:
 
 image::img/schedule.svg[alt="sysroot release schedule, showing 3-year lookback from publication year",role=half-width]

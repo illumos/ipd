@@ -7,7 +7,7 @@
 :authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor:
 
-= IPD 60 Generalized Regspecs, PCIe Segments, and ACPI Root Nexus
+= IPD 60 Extended Regspecs, PCIe Segments, and ACPI Root Nexus
 {authors}
 
 [cols="3"]
@@ -291,7 +291,111 @@ whole purpose of this.
 
 === regspec details
 
+To facilitate better incremental evolution in the system, the regspec
+will begin with self-describing information that is present in every
+entry: the resource type, the resource version, and the total number of
+4-byte integers that the record requires including that one.
+
+While historically drivers have assumed a constant reg type, this allows
+us to provide a bit more flexibility and discoverability. While device
+families like PCI have means of knowing that there are different
+resource types, if say a GPIO was reqiured for it or something else
+entirely that couldn't be represented by a BAR or config space, then
+that would lead to something that is quite confusing.
+
+The following is the first definition for the extended regspec:
+
+----
+typedef struct regext_hdr {
+	uint16_t rxh_type;
+	uint8_t rxh_vers;
+	uint8_t rxh_nu32;
+	uint32_t rxh_flags;
+	uint8_t rxh_rsvd[8];
+	uint32_t rxh_data[];
+} regext_hdr_t;
+
+#define	REGSPEC_TYPE_MEMORY	0
+#define	REGSPEC_TYPE_IO		1
+#define	REGSPEC_TYPE_AMDSMN	2
+#define	REGSPEC_TYPE_PCICFG	3
+----
+
+Let's discuss these in more detail:
+
+* The `rxh_type` member will define what type of register spec this
+  uses. These types are going to be considered global. Many of them will
+  overlap; however, they may not all. Different platforms and
+  architectures are allowed to assign other values and it is expected
+  that nexi that do not understand a given type will reject it.
+* The `rxh_vers` refers to the version of the hardware type's data. It
+  does not refer to the version of the `regext_hdr_t`. More specifically
+  this means that `REGSPEC_TYPE_MEMORY` and say `REGSPEC_TYPE_AMDSMN`
+  all have different version streams. Versions cannot be looked at
+  without including the resource type.
+* The `rxu_nu32` indicates how many u32 values are in a single instance
+  of the register specificaiton. the number will always be a minimum of
+  4 to cover the header. This is important for devices that will have
+  multiple different types of reg[] values. Many drivers today will look
+  up the `reg[]` property and divide by a fixed number. As we develop
+  this and we have drivers that need to actually walk this, DDI routines
+  will be introduced to handle this so we don't have dozens of bespoke
+  parsing functions.
+* The `rxu_flags` and `rxu_rsvd[8]` data are being saved for future
+  extensions. The expectation is that flags values will be set to
+  indicate behaviors. Drivers are expected to reject requests with
+  unknown flags values.
+* The `rxh_data[]` member is considered to have a number of valid values
+  based on rxu_nu32. XXX should this actually just be the number of
+  additional as the header is covered?
+
+Here is how we'd define the various initial registers types for the
+above:
+
+----
+typedef struct regext_memory {
+	uint64_t mem_base;
+	uint64_t mem_len;
+} regext_memory_t;
+
+typedef struct regext_io {
+	uint16_t io_base;
+	uint16_t io_len;
+} regext_io_t;
+
+typedef struct regext_pcicfg {
+	uint8_t pci_seg;
+	uint8_t pci_bus;
+	uint8_t pci_dev;
+	uint8_t pci_func;
+	uint32_t pci_len;
+} regext_pcicfg_t;
+
+XXX SMN
+
+----
+
 XXX
+
+The following table summarizes how some of these fit together:
+
+XXX
+
+Now, you might say why isn't there something that is mapping a normal
+`pci_regspec_t` for dealing with BARs here. The expectation is that
+because those are already just other types, those would be translated
+into the correspoding MEMORY and I/O types.
+
+=== Bus Mapping
+
+Dealing with this new type can be troublesome to reach the root nexus.
+We don't want to assume that all drivers will use this. To allow for a
+smoother evolution between parents and children, to indicate that a
+driver is doing a mapping call that leverages this regspec, we will add
+in a new `ddi_map_type_t` enumeration to cover when the regspec is
+guaranteed to be in the form above: `DDI_MT_REGEXT`. Without this all
+children of a given parent would need to change at the same time, which
+would not necessairily be tennable.
 
 == Handling PCI Segments
 
@@ -344,7 +448,7 @@ list with the following properties:
   properties and equivalent well-known device tree properties so that
   way the leaf drivers can remain the same regardless of who the parent
   is.
-* These devices will use the new generalized regspec as a way to
+* These devices will use the new extended regspec as a way to
   communicate information back up the bus.
 
 In particular, as part of this change we anticipate allowing through

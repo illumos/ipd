@@ -59,7 +59,7 @@ the oldest supported LTS release from OmniOS, as well as the SmartOS LTS
 release against which illumos pkgsrc is built.
 
 The selection of `Y - 3` as the window of time for which a sysroot will
-maintain backwards compatibility is an policy choice, attempting to balance the
+maintain backwards compatibility is a policy choice, attempting to balance the
 tension of supporting users with systems of varying ages, while still exposing
 changes to the OS in a somewhat timely manner.  Its coincidence with the OmniOS
 release schedule is for convenience, rather than any explicit statement of
@@ -71,7 +71,7 @@ image::img/schedule.svg[alt="sysroot release schedule, showing 3-year lookback f
 
 Only instruction set architectures supported by the illumos project are in
 scope for sysroot generation and publishing.  Currently, that policy would mean
-only an i386/amd64 sysroot will be published.
+only an i386+amd64 sysroot will be published.
 
 Responsibility for the creation and publishing of sysroots will reside with the
 Core Team.
@@ -87,6 +87,7 @@ system/header +
 system/library +
 system/library/math +
 system/library/c-runtime
+
 Excluding package contents from these directories::
 /usr/share +
 /etc +
@@ -96,6 +97,7 @@ Excluding package contents from these directories::
 /usr/ccs +
 /sbin +
 /bin
+
 Generated library shims (32-bit and 64-bit) for::
 libgcc_s.so.1 +
 libssp.so.0.0.0

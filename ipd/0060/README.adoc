@@ -26,7 +26,7 @@ through an improved ACPI root nexus. This will:
 * Make it easier for platforms to have platform-specific register
   specifications.
 * Make it easier for us to share drivers that can be found across
-  different types of busses and propagating information back up through
+  different types of buses and propagating information back up through
   the DDI.
 * Provide some means of evolving pieces of the system that have changed
   where we don't want to impact leaf device drivers such as the fact
@@ -36,7 +36,7 @@ through an improved ACPI root nexus. This will:
 == Background
 
 At the core of the device model that we have is the `reg[]` and
-`assigned-adresses[]` properties. These properties describe how a
+`assigned-addresses[]` properties. These properties describe how a
 particular instance of a device should find its registers and then where
 they have been mapped to by the kernel. Most of the time, the particular
 values are transparent to a device driver as each instance will have
@@ -299,7 +299,7 @@ entry: the resource type, the resource version, and the total number of
 While historically drivers have assumed a constant reg type, this allows
 us to provide a bit more flexibility and discoverability. While device
 families like PCI have means of knowing that there are different
-resource types, if say a GPIO was reqiured for it or something else
+resource types, if say a GPIO was required for it or something else
 entirely that couldn't be represented by a BAR or config space, then
 that would lead to something that is quite confusing.
 
@@ -324,17 +324,18 @@ typedef struct regext_hdr {
 Let's discuss these in more detail:
 
 * The `rxh_type` member will define what type of register spec this
-  uses. These types are going to be considered global. Many of them will
-  overlap; however, they may not all. Different platforms and
-  architectures are allowed to assign other values and it is expected
-  that nexi that do not understand a given type will reject it.
+  uses. These types are going to be considered global and shared across
+  all architectures and platforms. Many of them will overlap; however,
+  they may not all. Different platforms and architectures are allowed to
+  assign other values and it is expected that nexi that do not
+  understand a given type will reject it.
 * The `rxh_vers` refers to the version of the hardware type's data. It
   does not refer to the version of the `regext_hdr_t`. More specifically
   this means that `REGSPEC_TYPE_MEMORY` and say `REGSPEC_TYPE_AMDSMN`
   all have different version streams. Versions cannot be looked at
   without including the resource type.
 * The `rxu_nu32` indicates how many u32 values are in a single instance
-  of the register specificaiton. the number will always be a minimum of
+  of the register specification. The number will always be a minimum of
   4 to cover the header. This is important for devices that will have
   multiple different types of reg[] values. Many drivers today will look
   up the `reg[]` property and divide by a fixed number. As we develop
@@ -371,20 +372,53 @@ typedef struct regext_pcicfg {
 	uint32_t pci_len;
 } regext_pcicfg_t;
 
-XXX SMN
+typedef struct regext_smn {
+	uint32_t smn_unit;
+	uint32_t smn_len;
+	uint64_t smn_addr;
+} regext_smn_t;
 
 ----
 
-XXX
+The memory and I/O ones for these are the most simple. They basically
+describe a basic region starting from a base address and then a length.
+The PCI configuration space entry is similar to the existing information
+that is encoded when we are trying to map configuration space; however,
+it provides the addition of the ability to select the PCI segment.
 
-The following table summarizes how some of these fit together:
+The SMN one is the first place where we see something a bit different
+and has something that may want to exist in some of the memory based
+operations in the future. This basically includes the notion of a unit.
+There are several different units that exist that range from I2C, I3C,
+different GPIO entries, the various L3 caches, the various PCI IOHC,
+Cores, and Ports, etc. There are many drivers that may have different
+entries here and that would provide them a way to know as to which
+resources they are referring to when they are walking these.
 
-XXX
+This could apply to the memory based units as well. For example, the AMD
+GPIO driver ideally wants to have three memory regions: one for the
+primary GPIO, one for the remote GPIOs, and a third to cover the remote
+GPIO reset and interrupt controls. This would ultimately come back to a
+promise between parent and child if we did so, which may end up getting
+us back to the point that it defeats the goal of the extended regspec.
+We will need to get more experience here.
 
 Now, you might say why isn't there something that is mapping a normal
 `pci_regspec_t` for dealing with BARs here. The expectation is that
 because those are already just other types, those would be translated
-into the correspoding MEMORY and I/O types.
+into the corresponding MEMORY and I/O types as we walked up 
+
+==== Versioning
+
+Earlier we mentioned that each of these regspecs is versioned. The
+expectation is that upon adding newer versions is that we'd extend the
+length of the `reg[]` with the newer version so if we revised the memory
+spec to have a unit, we would include both the v0 and v1 entry so that
+way existing drivers would continue to function without requiring
+modification and would instead be able to opt into newer regspecs.
+Conversely, once a driver learned of a newer version, it would not be
+expected to retain support for an older version (assuming it did not
+want to run on older bits.)
 
 === Bus Mapping
 
@@ -396,6 +430,57 @@ in a new `ddi_map_type_t` enumeration to cover when the regspec is
 guaranteed to be in the form above: `DDI_MT_REGEXT`. Without this all
 children of a given parent would need to change at the same time, which
 would not necessairily be tennable.
+
+=== DDI Functions
+
+One of the goal's that we have is to allow drivers to be able to more
+easily walk the `reg[]` specifications. To help motivate an example of
+this, we should use the DesignWare I2C controller. This shows up as a
+memory mapped peripheral at a fixed address on many systems; however, it
+also can be instantiated as a PCI device which is the case on some Intel
+Atom-era SoCs. To minimize the impact in the system, it isn't expected
+that PCI based drivers will ever change their regspec.
+
+A second example is in AMD's GPIO controller. ACPI systems do not always
+provide a memory region that covers both the primary GPIO set and the
+remote GPIO set which is in a different memory range. However, other
+discovery methods do allow for both of these to be present. This means
+that iterating the reg array becomes more important and we should add
+some routines to help with that logic overall.
+
+The following are the rough outlines of functions that we are proposing
+to add to the DDI to help with this. As we actually prototype and use
+these, the set of functions may shift.
+
+----
+/*
+ * Indicate whether or not a device is using the extended regspec.
+ */
+bool ddi_uses_ext_regspec(dev_info_t *dip);
+
+/*
+ * Return a count of regspecs that match the specific version and type.
+ */
+uint32_t ddi_ext_regspec_count(dev_info_t *dip, uint32_t type,
+    uint32_t vers);
+
+/*
+ * This goes through and finds a specific index of an extended register version
+ * and type.  It returns either the register index number or a pointer to the
+ * actual index.
+ */
+bool ddi_ext_regspec_find(dev_info_t *dip, const int *reg, uint_t nregs,
+    uint32_t type, uint32_t vers, uint32_t idx, const void **regp,
+    uint_t *regnop);
+----
+
+These functions are still somewhat speculative in nature. The first and second
+are things that we know we're going to want to use. Due to the fact that there
+may be multiple versions of a given regspec to aid backwards compatibility, we
+don't generally want to assume the specific fixed number. While PCI devices for
+example have a fixed order that remains static, we don't want to promise that
+here. It likely would behoove us to have a series of iteration functions here
+and to potentially recast these in terms of that.
 
 == Handling PCI Segments
 
@@ -462,3 +547,17 @@ The I^2^C and GPIO driver will allow us to upstream these drivers that
 have been Oxide-only due to our lack of ACPI dependency. This also
 allows the foundation for more easily binding to the Intel system GPIO
 controllers and helps on ARM as well.
+
+== Implementation Plan and Deliverables
+
+This IPD plans to work on:
+
+* Using the new extended regspec to implement support for the ACPI nexus
+  and binding an initial set of AMD drivers. Likely the ACPI nexus will
+  stop and translate these into the traditional regspec.
+* Experimenting with both smntemp(4D) and on some Oxide-specific drivers
+  plumbing through the SMN structure and finalizing that.
+* Enabling the use of segment properties based on platform-derived
+  information.
+* Working through plumbing this up through the various nexi and rootnex
+  as appropriate.

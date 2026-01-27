@@ -1,0 +1,166 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: published
+:revremark: State: {state}
+:authors: Patrick Mooney <pmooney@pfmooney.com>
+:sponsor: Gordon Ross <gordon.w.ross@gmail.com>
+
+= IPD 59 Sysroots
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+This IPD describes the policies, procedures, and motivations for the publication
+of illumos sysroots for external consumption.
+
+== Background
+
+A sysroot is an archive containing the headers and link/runtime libraries
+necessary to cross-compile software to run on a given target.  It is not a full
+OS image, and is not itself runnable.  The purpose is simply to expose
+committed development headers and link objects to build software which will run
+successfully on the target system.
+
+In order to make illumos an officially supported platform for the Rust language
+and toolchain, a <<sysroot-20181213-v1,sysroot>> was created to support
+cross-compilation from a Linux environment.  As recorded in the release notes,
+that sysroot used a commit chosen to align with LTS releases from 2 years prior
+in OmniOS, OpenIndiana, and SmartOS to ensure that binaries built against it
+would be supported on most existing installs.
+
+That version of the sysroot has continued to be used by the Rust
+<<rust-docker-script,illumos build>> infrastructure since then, prompting calls
+for a newer artifact in order to include features from newer OS releases.
+
+== Goals
+
+The illumos organization should periodically release new versions of the sysroot
+so that Rust (and other software which wishes to cross-compile to illumos) can
+rely on having an up-to-date, but still widely supported, platform against
+which it can be built.
+
+== Proposal
+
+In order to achieve the desired compatibility with the existing install base,
+while still balancing the need to expose new functionality from the operating
+system, a new sysroot will be generated and published annually.  It will be
+built from a commit dating 3 years prior.  For release year `Y`, the most
+recent commit before 1 May of `Y - 3` will be selected from which to perform
+the build.  This coincides with the
+<<omnios-release-schedule,OmniOS release schedule>>, and should cover both
+the oldest supported LTS release from OmniOS, as well as the SmartOS LTS
+release against which illumos pkgsrc is built.
+
+The selection of `Y - 3` as the window of time for which a sysroot will
+maintain backwards compatibility is a policy choice, attempting to balance the
+tension of supporting users with systems of varying ages, while still exposing
+changes to the OS in a somewhat timely manner.  Its coincidence with the OmniOS
+release schedule is for convenience, rather than any explicit statement of
+support.
+
+The publishing schedule would resemble something like this:
+
+image::img/schedule.svg[alt="sysroot release schedule, showing 3-year lookback from publication year",role=half-width]
+
+Only instruction set architectures supported by the illumos project are in
+scope for sysroot generation and publishing.  Currently, that policy would mean
+only an i386+amd64 sysroot will be published.
+
+Responsibility for the creation and publishing of sysroots will reside with the
+Core Team.
+
+=== Contents
+
+The contents of the generated sysroot will be chosen according to the Makefiles
+in the <<sysroot-repo, sysroot repository>>.  At the time of this writing, that
+includes:
+
+Contents of these IPS packages::
+system/header +
+system/library +
+system/library/math +
+system/library/c-runtime
+
+Excluding package contents from these directories::
+/usr/share +
+/etc +
+/var +
+/usr/bin +
+/usr/sbin +
+/usr/ccs +
+/sbin +
+/bin
+
+Generated library shims (32-bit and 64-bit) for::
+libgcc_s.so.1 +
+libssp.so.0.0.0
+
+=== Procedure
+
+Using 2025 as an example year:
+
+1. Select the most recent commit prior to 1 May of 2022:
++
+----
+$ git log --until=2022-05-01 --format=fuller -n1
+commit e0994bd28f025d3d74315f7479562b6be19773c3
+Author:     Patrick Mooney <pmooney@pfmooney.com>
+AuthorDate: Tue Apr 19 21:31:28 2022 +0000
+Commit:     Patrick Mooney <pmooney@oxide.computer>
+CommitDate: Fri Apr 29 21:43:44 2022 +0000
+
+      14649 remove blanket smatch gag from bhyve kernel
+...
+----
++
+NOTE: It is the commit date, not the author date, which is considered for the
+cut-off here, as it corresponds to when the change was integrated.
+2. Select the OmniOS LTS version that was supported at the time of the
+   commit. In this case r151038.
+3. On a system with the specified OmniOS version installed, build
+   illumos-gate from the selected commit
+4. Preserve the env file used for the build, committing it as
+   `env/illumos.YYYYMMDD.sh` in the <<sysroot-repo,sysroot>> repository so that
+   the build could be reproduced in the future
+5. Generate the sysroot tarball from the package repository generated from the
+   above build using the utility provided by sysroot:
++
+----
+$ make archive ILLUMOS_PKGREPO=<path-to-repo-built-from-commit>
+----
+6. Verify contents of sysroot tarball.  This could include manual spot-checks,
+   as well as attempting a build of the Rust toolchain against it.
+7. After successful verification, create a new tag in `sysroot` from the
+   established convention.  For revision 1 of the example commit, it would be:
+   `20220429-e0994bd28f02-v1`
+8. Publish a release of that tag on the Releases page of the sysroot GitHub
+   repository
+
+== Open Questions
+
+* When should the creation take place?  Is "in May" adequately prescriptive?
+* If there are substantial changes to the OS which align poorly with the
+  proposed sysroot schedule, would we consider creating one "off-cycle" (but
+  still adhering to the `Y - 3` lookback) to shorten the wait for access to the
+  changes?
+* To what degree should bugfix backports be considered when creating a sysroot?
+  There are intervals where since-fixed bugs (such as <<illumos-17765,#17765>>,
+  for example) could impact consumers.  Backporting specific fixes could
+  remedy those known issues without otherwise jeopardizing the compatibility
+  properties of the sysroot.
+
+
+== References
+
+* [[sysroot-20181213-v1]]https://github.com/illumos/sysroot/releases/tag/20181213-de6af22ae73b-v1[illumos sysroot release 20181213-v1 (de6af22ae73b)]
+* [[rust-docker-script]]https://github.com/rust-lang/rust/blob/d9617c8d9a55773a96b61ba3a4acb107d65615c1/src/ci/docker/scripts/illumos-toolchain.sh[Rust CI illumos toolchain script (illumos-toolchain.sh)]
+* [[omnios-release-schedule]]https://omnios.org/schedule[OmniOS release schedule]
+* [[sysroot-repo]]https://github.com/illumos/sysroot[illumos Sysroot Repository]
+* [[illumos-17765]]https://www.illumos.org/issues/17765[illumos Issue #17765 - assert.h checks post-17491 are bad for C++]

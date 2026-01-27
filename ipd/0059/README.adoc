@@ -2,10 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
-:authors: Patrick Mooney
-:sponsor:
+:authors: Patrick Mooney <pmooney@pfmooney.com>
+:sponsor: Gordon Ross <gordon.w.ross@gmail.com>
 
 = IPD 59 Sysroots
 {authors}

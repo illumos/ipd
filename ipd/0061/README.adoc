@@ -57,6 +57,7 @@ The different hypervisor transports support different kinds of socket
 types. The following table summarizes the different types of socket
 support:
 
+.AF_VSOCK Transports
 [options="header",cols=5]
 |===
 | Transport | STREAM | DGRAM | SEQPACKET | Notes
@@ -320,6 +321,8 @@ defaults. What tuning-is allowed is not clear.
 The following is an attempt to enumerate existing socket options and how
 we anticipate them applying:
 
+.Traditional Socket Options with `AF_VSOCK`
+[options="header",cols=3"]
 |===
 | Option | Works | Notes
 | `SO_DEBUG` | Yes | Will be treated as a no-op
@@ -436,7 +439,7 @@ number much like other interfaces. These will show up in `vsockadm` and
 be labeled in the following manner:
 
 * `virtio%u` e.g. `virtio0` for a virtio based transport
-* `loopback` for the primary loopback interface
+* `vsocklo0` for the primary loopback interface
 
 Other transports such as Hyper-V and VMware would follow the virtio
 based naming and use something like `hyperv0` and `vmware0` when they
@@ -651,6 +654,8 @@ There are numerous network observability tools. The following table
 summarizes our expectation of what we will do with each tool followed by
 a longer discussion:
 
+.Userland Tooling Improvements
+[options="header"]
 |===
 | Tool | vsock | Discussion
 | `connstat` | yes | See <<sec-connstat>>
@@ -728,6 +733,7 @@ element that has a number of entries related to things like
 data types to be honored as summarized by the following table:
 +
 .Supported prfdinfo_t Miscellaneous Data
+[options="header"]
 |===
 | Option | Supported | Notes
 | PR_PATHNAME | No | Not applicable to `AF_VSOCK`

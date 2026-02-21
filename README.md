@@ -72,6 +72,7 @@ information is available at the end of this document.
 | published | [IPD 58 EEPROM Device Framework](./ipd/0058/README.adoc)
 | published | [IPD 59 Sysroots](./ipd/0059/README.adoc)
 | predraft  | [IPD 60 Generalized Regspecs, PCIe Segments, and ACPI Root Nexus](./ipd/0060/README.adoc)
+| predraft  | [IPD 61 AF_VSOCK support](./ipd/0061/README.adoc)
 
 ## Contributing
 

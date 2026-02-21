@@ -1,0 +1,784 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Robert Mustacchi <rm@fingolfin.org>
+:sponsor:
+
+= IPD 61 AF_VSOCK support
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+The `AF_VSOCK` family provides a series of different kinds of sockets
+that allow for communication between a virtual machine and its
+corresponding hypervisor. While the API was first developed in Linux for
+communication with VMware, it is most prominently used with the virtio
+vsock device and there are even variants of this for Hyper-V.
+
+This IPD goes into the specifics of how we intend to support the vsock
+interface, some of the key user interface determinations that we intend
+to make, and some rough notes on the overall structure here.
+
+== Background
+
+The `AF_VSOCK` provides a transport between a guest and a hypervisor.
+Where as our normal networks are identified by IP addresses, different
+entities are identified by opaque unsigned 32-bit context IDs called
+CIDs. There are a few well known CIDs in the system:
+
+* `VMADDR_CID_ANY` (`UINT32_MAX`): this CID basically says bind to any CID.
+  Generally applications are encouraged to do this to avoid needing to
+  know about the current CID.
+* `VMADDR_CID_HYPERVISOR` (0): This says to talk to services in the
+  hypervisor.
+* `VMADDR_CID_LOCAL` (1): This says to talk to the local virtual
+  machine. Effectively it is a loopback address.
+* `VMADDR_CID_HOST` (2): This says to talk to the host that is running
+  the virtual machine.
+
+The transport specifications generally only define a subset of these as
+well known CIDs. For example, the virtio spec leaves values of 0 and 1
+reserved and only defines `VMADDR_CID_HOST`.
+
+On top of this, ports are used, just like in IP. The system is supposed
+to treat ports below 1024 as privileged ports. Similar to other network
+endpoints, a port value of -1, `VMADDR_PORT_ANY` should be used for
+binding to any port.
+
+The different hypervisor transports support different kinds of socket
+types. The following table summarizes the different types of socket
+support:
+
+[options="header",cols=5]
+|===
+| Transport | STREAM | DGRAM | SEQPACKET | Notes
+| Hyper-V | Yes | - | - | From Linux
+| Virtio | Yes | - | Yes | Per Virtio 1.3
+| VMware | Yes | Yes | - | From Linux
+|===
+
+The most common type of socket here is a stream socket that has
+semantics similar to TCP with the idea of a connection.
+
+=== Transport Flow Control
+
+Given the prevalence of STREAM and SEQPACKET sockets, flow control is an
+important part of the design. Unlike TCP which relies on windows and
+retransmits, virtio socket relies on precise communication of the amount
+of buffer space that is available at the far end. There is no way to
+reclaim lost data, which makes the maintenance of this information in
+the backend and the relationship with the socket buffer critically
+important.
+
+Updates to this information are transport-specific; however, virtio does
+this by including the counts in the headers of various packets so that
+this can be updated. In addition, there are commands that can be used to
+request and receive updates to the amount of data that is available in a
+given buffer.
+
+=== sockaddr
+
+Currently Linux defines the sockaddr and related information in
+`<linux/vm_sockets.h>`. The sockaddr is defined as:
+
+----
+struct sockaddr_vm {
+sa_family_t    svm_family;    /* Address family: AF_VSOCK */
+unsigned short svm_reserved1;
+unsigned int   svm_port;      /* Port # in host byte order */
+unsigned int   svm_cid;       /* Address in host byte order */
+unsigned char  svm_zero[sizeof(struct sockaddr) -
+		       sizeof(sa_family_t) -
+		       sizeof(unsigned short) -
+		       sizeof(unsigned int) -
+		       sizeof(unsigned int)];
+};
+----
+
+While both the `svm_reserved1` and `svm_zero` regions are defined to be
+zero, there is no logic in Linux that enforces it today.
+
+=== Local CID Discovery
+
+Local CID discovery is performed on Linux by performing an ioctl on the
+`/dev/vsock` device using the `IOCTL_VM_SOCKETS_GET_LOCAL_CID` command.
+This is the only currently defined means of getting this information. 
+
+=== Local CID Assignment
+
+An important callout is that vsock operates regardless of whether or not
+a hypervisor-specific transport is present. There is a default CID
+assignment order that is used today by Linux:
+
+. If a transport mechanism is present to provide connectivity to a
+hypervisor (regardless of whether the system is strictly virtualized or
+not) then the CID that it registered is the one that is used. For
+example, this is the CID that is provided over the virtio-sock driver's
+configuration space.
+. If a transport mechanism is present which provides connectivity to
+guests, e.g. vhost-vsock, then its CID is used. In general this will
+default to a value of 2: `VMADDR_CID_HOST`.
+. Finally, if none of those is present, then the system will return the
+loopback CID 1: `VMADDR_CID_LOCAL`.
+
+=== Socket Options
+
+While the https://man7.org/linux/man-pages/man7/vsock.7.html[Linux
+vsock(7)] manual page does not define any socket options, the underlying
+implementation and header file does define a number of different socket
+options. These socket options are defined at their own level using the
+constant `AF_VSOCK`. The vsock-specific socket options only apply to
+connection-oriented socket types today. Notably there are more socket
+options defined then appear to be obviously implemented. These
+specifically are: `SO_VM_SOCKETS_PEER_HOST_VM_ID`,
+`SO_VM_SOCKETS_TRUSTED`, and `SO_VM_SOCKETS_NONBLOCK_TXRX`.
+
+This leaves us with two different groups of socket options to discuss as
+we eventually want to consider what we implement.
+
+Socket Buffers::
+
+There are a trio of options that deal with the socket buffer size,
+minimum, and maximum: `SO_VM_SOCKETS_BUFFER_SIZE`,
+`SO_VM_SOCKETS_BUFFER_MIN_SIZE`, and `SO_VM_SOCKETS_BUFFER_MAX_SIZE`
+respectively. These are used to communicate how much memory is available
+for the socket to use and is part of the overall flow control strategy.
+The exact interplay between these and the traditional `SO_SNDBUF` and
+`SO_RCVBUF` needs more research.
+
+Connection Timeouts::
+
+`SO_VM_SOCKETS_CONNECT_TIMEOUT` is the way that one can define an
+updated connect timeout that is different from the backend default. This
+is currently defined to take a `struct timeval`. There is no traditional
+connection timeout socket option that is used across multiple protocols.
+For example, on us one has to use `TCP_CONN_ABORT_THRESHOLD` for TCP and
+`SCTP_INITMSG` for SCTP.
+
+=== cmsg data
+
+Linux currently provides its own cmsg level, `SOL_VSOCK`. This is only
+used for cases where the Linux-specific `MSG_ERRQUEUE` is passed. This
+information is generally only used when dealing with their page-pinning
+based zerocopy and therefore is less relevant for us today.
+
+== General Design
+
+This change will add support for a new socket module, vsock. The vsock
+module will be structured with the ability to support a number of
+different transport plugins. For the initial work the backend transports
+are intended to be:
+
+* Virtio Socket
+* Loopback
+
+In general, the goal will be to have as much of the overall data that we
+require and logic for dealing withe `sockfs` and related in the general
+`vsock` code and then use a backend-specific transport driver. Just like
+other protocols, this will tie into a zone's netstack using a new
+protocol structure, most likely a `struct vsock_stack`. Connections will
+likely use `vsock` specific structures and not really be able to reuse
+the existing `conn_t` due to the fact that the `conn_t` is specifically
+designed to deal with IP-oriented data and a lot of its value is around
+handling existing IP-specific options, cmsg data, etc.
+
+While it will be up to the transport to provide the overall set of
+potentially supported socket types, the overall types that we will use
+will be limited and focused on enabling STREAM sockets. SEQPACKET may be
+considered depending on project progress and consumer need. It is likely
+that this will be left to future work in the system.
+
+Unlike other protocols, vsock is not intended to be used via DLPI or
+TLI. This does mean that there are a number of things that we will need
+to deal with in the system; however, this is not the first socket
+protocol that is not built on top of DLPI or TLI. For example, things
+like routing sockets do not use this. The biggest challenge which we'll
+come back to is that this means we'll need to figure out alternative
+means of how to provide observability and a promiscuous mode.
+
+The exact operations vector and registration signatures will be
+considered private to the system. Implementation experience will be
+required to determine the exact API shape here. However, generally
+speaking backends will be expected to provide:
+
+* A CID to use
+* A list of socket types that they support (e.g. SOCK_STREAM,
+  SOCK_DGRAM, etc.)
+* A series of downcalls to the backend that take care of things like
+  various operations such as transmitting requests, initializing
+  connections, etc.
+* A series of upcalls from the vsock for additional information around
+  flow control, reset connections, etc..
+
+The rest of this section gets into various tradeoffs and definitions
+that we are going to consider, where some of these have compatibility
+implications, and more.
+
+=== sockaddr and basic definitions
+
+The very first thing that we need to figure out is where and what are
+the various initial definitions that we will provide. Existing software
+has assumptions due to this originating in Linux. Our goal is not to be
+spuriously incompatible.
+
+. We will define `AF_VSOCK` and `PF_VSOCK` in `<sys/socket.h>`. We will
+use the next available AF value, which is currently 33. Note, this value
+is not compatible with Linux's default value. Unfortunately it's
+generally difficult and these values are going to always end up being
+OS-specific. There are not generally gaps in the AF space with the
+definition of `AF_MAX. Even if we wanted to pick say the Linux value of
+`AF_VSOCK` as 40, other OSes have used that value.
+
+. To contain all of the various vsock related constants we need a header
+file to define the socket address format and related. On Linux this is
+in `<linux/vm_sockets.h>`. We do not want to introduce the use of those
+paths as applications can make various assumptions about that. This does
+mean that there will be differences and portability gotchas; however,
+this is somewhat unavoidable as our experience with some of the other
+facilities such as epoll, signalfd, etc. shows that software can make
+assumptions based on the paths present.
++
+We propose creating a new header, `<net/vsock.h>` to contain the various
+definitions here. UNIX domain sockets, `<sys/un.h>`, use the broader
+system directory; however, given the case of other networking things
+being in `net`, we propose keeping it there.
+
+. We propose implementing the same definition for the `sockaddr_vm` as
+Linux does. This will be in `<net/vsock.h>` and will be:
++
+----
+struct sockaddr_vm {
+sa_family_t    svm_family;    /* Address family: AF_VSOCK */
+unsigned short svm_reserved1;
+unsigned int   svm_port;      /* Port # in host byte order */
+unsigned int   svm_cid;       /* Address in host byte order */
+unsigned char  svm_zero[sizeof(struct sockaddr) -
+		       sizeof(sa_family_t) -
+		       sizeof(unsigned short) -
+		       sizeof(unsigned int) -
+		       sizeof(unsigned int)];
+};
+----
++
+We propose verifying that the svm_reserved1 and svm_zero regions are
+actually zero initially and failing if they are not when processing the
+sockaddr. While this is slightly divergent behavior, this allows us to
+try to stop applications that will use it differently in the future. If
+working with existing applications proves this is a bad idea, we can
+loosen this check. Newer versions of Linux have added an `svm_flags`
+field at the start of the `svm_zero`.
+
+. We will define identical constants for the following macros:
+** `VMADDR_CID_ANY`
+** `VMADDR_PORT_ANY`
+** `VMADDR_CID_HYPERVISOR`
+** `VMADDR_CID_LOCAL`
+** `VMADDR_CID_HOST`
+
+. For compatibility purposes, we will implement similar socket options
+to those that Linux implements today and actually has definitions for.
+These will use the same values for the options. In addition, we will use
+the same source-compatible level `AF_UNIX`, though this has a distinct
+ABI value per the earlier discussion. Any illumos-specific socket
+options that we opt to add will use their own level: `SOL_VSOCK` to give
+us a different namespace to ensure we don't end up conflicting. The
+following socket options are current planned:
++
+[options="header",cols=3]
+|===
+| Option | Size | Notes
+| `SO_VM_SOCKETS_BUFFER_SIZE` | `uint64_t` | See buffer discussion below
+| `SO_VM_SOCKETS_BUFFER_MAX_SIZE` | `uint64_t` | See buffer discussion below
+| `SO_VM_SOCKETS_BUFFER_MIN_SIZE` | `uint64_t` | See buffer discussion below
+| `SO_VM_SOCKETS_CONNECT_TIMEOUT` | `struct timeval` | Used to control
+the connect timeout. While it could make sense to define this in a
+`time_t` neutral way, ultimately it makes more sense to try to be
+compatible with existing applications right now.
+|===
+
+Currently, we anticipate that the way we calculate free and used space
+for a given socket buffer is going to come directly from its existing
+send and receive buffer. While only the receive buffer space is
+communicated over the transport, we view this as basically another way
+to phrase the existing send and receive buffer and not the creation of a
+second set of allocated space for this system. Effectively, our initial
+proposal is that setting `SO_VM_SOCKETS_BUFFER_SIZE` be equivalent to
+setting `SO_SNDBUF` and `SO_RCVBUF` on the socket. The tuning we should
+allow on the MIN and MAX isn't clear. There likely need to be stack-wide
+defaults. What tuning-is allowed is not clear.
+
+==== Standard Socket Options
+
+The following is an attempt to enumerate existing socket options and how
+we anticipate them applying:
+
+|===
+| Option | Works | Notes
+| `SO_DEBUG` | Yes | Will be treated as a no-op
+| `SO_ACCEPTCONN` | Yes | -
+| `SO_REUSEADDR` | No | This could be supported, but we are going to
+wait until we have a motivating use case from a consumer to minimize the
+implementation complexity.
+| `SO_KEEPALIVE` | No | No notion of keepalive defined at the protocol
+layer here.
+| `SO_DONTROUTE` | No | No notion of routing
+| `SO_BROADCAST` | No | No notion of broadcast
+| `SO_USELOOPBACK` | No | While this could maybe make sense, we want to
+have a motivating use case before we do.
+| `SO_LINGER` | Yes | For connection-oriented only
+| `SO_OOBINLINE` | No | No notion of OOB data
+| `SO_DGRAM_ERRIND` | No | Could make sense if we add DGRAM support in
+the future.
+| `SO_RECVUCRED` | Maybe | This only makes sense for loopback.
+| `SO_SNDBUF` | Yes | -
+| `SO_RCVBUF` | Yes | -
+| `SO_SNDLOWAT` | No | Not handled by non-SDP today
+| `SO_RCVLOWAT` | No | Not handled by non-SDP today
+| `SO_SNDTIMEO` | Yes | Handled at sockfs
+| `SO_RCVTIMEO` | Yes | Handled at sockfs
+| `SO_ERROR` | Yes | Handled at sockfs
+| `SO_TYPE` | Yes | -
+| `SO_PROTOTYPE` | Yes | Read-only
+| `SO_PROTOCOL` | Yes | Read-only
+| `SO_ANON_MLP` | No | Trusted Extensions not supported.
+| `SO_MAC_EXEMPT` | No | Trusted Extensions not supported.
+| `SO_DOMAIN` | Yes | -
+| `SO_RCVPSH` | No | -
+| `SCM_RIGHTS` | No | While it is possible this makes sense over a
+loopback connection, we will wait for a motivating consumer.
+| `SO_SECATTR` | No | Not implemented directly today
+| `SCM_UCRED` | No | While this could make sense over a loopback socket,
+we are going to wait for a motivating consumer.
+| `SO_TIMESTAMP` | No | Could make sense if we add DGRAM support in the
+future.
+| `SO_ALLZONES` | No | There is no zone case here.
+| `SO_EXCLBIND` | No | See `SO_RESUSEADDR`.
+| `SO_MAC_IMPLICIT` | No | Trusted Extensions not supported.
+| `SO_VRRP` | No | VRRP is not relevant.
+|===
+
+The project team may opt to punt on some of the more complicated socket
+options until a motivating consumer appears to allow for basic
+`AF_VSOCK` usage to occur sooner.
+
+=== CID Discovery, Zone Awareness, and `soconfig`
+
+The next major design interface that we need to address is how does one
+discover the local CID. What is the scope of a CID, etc. Earlier we said
+that there is a per-netstack feature. This means that the scope of a CID
+in our opinion is an **exclusive** netstack. Before we get into the
+behavior of this in a non-global zone, let's first discuss how this is
+discovered and managed in the global zone.
+
+To support existing applications, we propose adding a `/dev/vsock` that
+will support a single ioctl defined in `<net/vsock.h>`. It will use the
+name `IOCTL_VM_SOCKETS_GET_LOCAL_CID`. While this is not the normal
+structure we might use, there is no reason to be spuriously different
+here. It will take a single `uint32_t` as an argument and return the
+assigned CID from the current zone's netstack. The binary value of this
+will be `0x7b9` to match the existing Linux value.
+
+While this is useful, we may explore other ways for getting this whether
+it's having a library function that wraps this, adding a system-specific
+socket option for getting the CID, or a libc call that wraps these
+others.
+
+In the global zone the value returned will be done in the following
+order:
+
+. If a non-loopback transport mechanism has registered (i.e.
+virtio-socket) then we will use the CID that it has indicated.
+. Otherwise, the local CID 1, `VMADDR_CID_LOCAL` will be returned.
+
+This means that any system regardless if it is virtualized or not will
+end up being able to use AF_VSOCK for at least localhost communication.
+This should simplify the testing process by allowing key parts of the
+sockfs level interface to always be usable.
+
+In a non-global zone, we propose always offering the loopback transport
+but nothing else. While it's possible to imagine a future where AF_VSOCK
+is used for zone-to-zone communication and the global zone receives the
+CID VMADDR_CID_HOST, that is left to future work to determine how to
+actually plumb things into a zone and what kinds of access controls
+would be required. This could perhaps look like a new zone-to-zone
+transport. However, it is explicitly considered out of scope.
+
+Support for AF_VSOCK will need to be registered with soconfig(8). By
+default, the packaging for this will include an `/etc/sock2path.d`
+plugin file that is unique to the vsock backend allowing it to be more
+easily enabled and disabled by an administrator in either a global or
+non-global zone.
+
+[[sec-lif]]
+=== Logical Interfaces
+
+Traditionally there is no moral equivalent of a specific network
+interface for the `vsock` devices. Given that the addresses that can be
+used are dependent on the transport providers, this makes some sense.
+However, this then means things like observability become challenging.
+In addition, while it would be quite strange to have more than one
+transport backend, it is is strictly possible with virtio appearing as a
+PCI device, albeit it would be quite odd.
+
+To make this subsystem more understandable, we propose the idea of
+having named transport-based devices which one can discover an address
+on in addition to the main vsock device which is required for
+compatibility. Transports will be named based on their transport and a
+number much like other interfaces. These will show up in `vsockadm` and
+be labeled in the following manner:
+
+* `virtio%u` e.g. `virtio0` for a virtio based transport
+* `loopback` for the primary loopback interface
+
+Other transports such as Hyper-V and VMware would follow the virtio
+based naming and use something like `hyperv0` and `vmware0` when they
+came about.
+
+To provide observability this can eventually be extended to include a
+`/dev/vnet` directory where each transport is listed with a character
+device that can be used for observability. See <<sec-snoop>> for more
+information.
+
+=== Address Canonicalization
+
+Various address families have long had ways to translate between the
+binary representation and a human representation. For illumos we propose
+that the canonical string form of a CID is a hexadecimal string of the
+form `0x%x`. This means that there are no leading zeros.
+
+As part of implementing the project, the project team will consider
+whether it is worth elevating this into its own dedicated functions ala
+`inet_ntop` or `ether_aton`. Any form of this that is implemented should
+be done in a re-entrant style. It may make sense to make this a part of
+a `libvsock` that corresponds with `vsockadm`.
+
+
+[[sec-adm]]
+=== `vsockadm`
+
+Having good userland tools to be able to understand what transports are
+present, registered, their addresses, etc. are important for folks. In
+addition, there are possible places where one wants to have stack-wide
+defaults. The intent of this tool is deal with things that one would
+look towards `ipadm` or `dladm` around discoverability and tuning.
+Critically unlike the other tools, this would not allow the idea of
+interfaces coming up and down. As discussed in <<sec-lif>>, these are
+not full IP / data-link layer interfaces. They are logical things to
+help aid in naming and discoverability.
+
+The features of `vsockadm` will be to:
+
+* List the registered `vsock` backends
+** Provide information about their corresponding CIDs
+** Provide information about the corresponding socket types
+** Provide information about the provider
+* Get and set any default netstack tuning and potentially any
+  per-transport tuning
+
+The exact CLI interface will be determined as part of broader
+development as we understand what else is available. As part of this we
+will need to figure out whether or not we add additional `ioctls` to the
+`/dev/vsock` device or if instead we go down the path of making a
+framework-enumerated minor that shows up in `/dev/vnet/%s` named after
+the device. The latter will ensure that we don't accidentally conflict
+with any future-Linux based ioctls added.
+
+=== Socket Filters
+
+It is expected that socket filters should work just fine with
+`AF_VSOCK`. No changes to the filter APIs are currently anticipated.
+
+[[sec-hook]]
+=== Firewalls and Hooks
+
+An interesting question to confront is should `AF_VSOCK` based packets
+be subject to firewall rules. While UNIX domain sockets are not, packets
+here enter and leave the system and therefore this is something we
+should potentially consider. To do so, we must first turn towards the
+hook subsystem and discuss how a non-IP interface would fit in there.
+
+The hook subsystem works by different providers registering hooks with
+the core framework. These hooks are then consumed by software such as
+`ipf` that wants to take action on them. Hooks are first organized by
+the notion of a family. Today the families that exist are: `arp`,
+`inet`, `inet6`, and `viona_inet`. After that, there are several
+specific hook events that can be registered for. Relevant to us are
+physical in/out and loopback in/out.
+
+When a hook is fired, it uses a specific family and event token along
+with an amount of metadata about the interface and a series of
+registered function pointers that can tell metadata about things. In
+general, most of these hook interfaces are specifically defined for
+things like IP. They have the idea of an interface name, MTU, path-MTU,
+different address types, the zone, the idea of IP flags, etc. If we are
+to do this only a subset of these make sense to implement. In
+particular:
+
+* Getting the name of an interface, if and only if we make one up (see
+  above)
+* Getting the address of the interface
+* Getting the zone of an interface
+
+While there are other things here that could be useful like injection
+and more, these aren't quite required for basic functionality. So
+ultimately whether or not they should be implemented should be motivated
+by someone wanting to consume them.
+
+Dropping packets from hooks has to be done very carefully. A major
+problem with packet drops for reliable connections is that there is no
+way to retransmit them, meaning any such accounting that we do will have
+to be done after it is accounted for by the equivalent state tracking in
+the system.
+
+In addition, another problem exists here. The required header metadata
+to identify something is ultimately transport specific. While the virtio
+transport includes information about the socket type, by default the
+loopback transport doesn't care about this as it basically is going to
+end up creating a pipe. If we were to add support for the Hyper-V
+transport, then we'd have to figure out how to transform its header. A
+generic from of what the header could look like for observability
+purposes exists. See <<sec-snoop>>.
+
+If we were to support this, one would do the following:
+
+* Add a new hook family called `vsock`
+* Establish a contract that forced the creation of the modified header
+  used for observability.
+* Fire events for physical-in, physical-out, loopback-in, and
+  loopback-out.
+
+Based on the complexity involved here, it is not clear that this should
+be brought into the initial project scope. At a minimum, we must make it
+easy to hook these things at the transport layer. It may be that the way
+of constructing this general information comes for free as part of work
+we'll describe below with DTrace.
+
+=== DTrace Provider
+
+To aid with observability, we propose that we should add a new DTrace
+provider called `vsock`. The `vsock` provider will be modeled generally
+after the TCP provider. As it is possible to have multiple different
+types of sockets, not all probes will fire for all socket types. The
+following table summarizes the set of probes we would like to have.
+Where practical, we will reuse the existing types that the existing
+network providers use. For example, the `pktinfo_t` translator.
+
+The following table summarizes the probes that we will add:
+
+.vosck DTrace Provider Probe Summary
+[cols=3,options="header"]
+|===
+| Probe | Type | Description
+| send | all | Fires whenever a packet is transmitted over an interface,
+including loopback.
+| recieve | all | Fires whenever a packet is received over an interface,
+including loopback.
+| accept-established | connection-oriented | Fires whenever a listening
+socket successfully accepts a new connection.
+| accept-refused | connection-oriented | Fires whenever a listening
+socket refuses a new connection.
+| connect-established | connection-oriented | Fires whenever a socket
+attempting to establish a connection succeeds.
+| connect-refused | connection-oriented | Fires whenever a socket
+attempting to connect is refused.
+| drop-in | all | Probe that fires whenever a packet is dropped on the
+inbound path. A string reason will be included.
+| drop-out | all | Probe that fires whenever a packet is dropped on the
+outbound path. A string reason will be included.
+| state-change | connection-oriented | Fires whenever a
+connection-oriented socket changes the state, ala TCP.
+|===
+
+We consider the DTrace provider a part of the primary deliverable for
+the project due to the fact that this is the best time to do it to
+ensure that everything is caught, in particular, for packets being
+dropped.
+
+[[sec-snoop]]
+=== Packet Capture and Snoop
+
+Figuring out how we end up performing network observability is quite
+important and unfortunately a part of this which is not straightforward.
+Because there is no direct interface for this on Linux, Linux has added
+a `vsockmon` driver to provide this. The Tcpdump project documents the
+packet format as
+https://www.tcpdump.org/linktypes/LINKTYPE_VSOCK.html[the following].
+
+It would make sense for us to provide a similar interface when capturing
+packets for this. We would have no transport header when using the
+loopback interface. The biggest challenges right now are how do we
+actually provide an interface for this. Both the existing promiscuous
+mode hooks and those provided by `/dev/ipnet` are designed as STREAMS
+devices.
+
+Per the discussion in <<sec-lif>> and <<sec-adm>> we would implement
+this as a series of devices in `/dev/vnet/%s`. It may be pertinent to
+develop a new non-STREAMS interface for getting and receiving packets in
+this fashion over these devices.
+
+Currently we are proposing to **not** implement packet capture as part
+of the project. This is a complex piece and the hope is that the DTrace
+provider will help in the interim.
+
+=== Privileges
+
+The existing set of network privileges will apply here. The following
+changes will be made:
+
+* `PRIV_NET_ACCESS` will extend to also include `AF_VSOCK` based
+  sockets.
+* `PRIV_NET_OBSERVABILITY` will cover similar packet capture cases in
+  the future.
+* `PRIV_NET_PRIVADDR` will apply here just as it does here. A property
+  for vsock_extra_priv_ports will be added like it has been for TCP and
+  UDP.
+* `PRIV_NET_RAWACCESS` would apply; however, we do not anticipate a way
+  to access this in a raw fashion.
+
+No other new privileges are anticipated with this IPD.
+
+=== Userland Observability
+
+There are numerous network observability tools. The following table
+summarizes our expectation of what we will do with each tool followed by
+a longer discussion:
+
+|===
+| Tool | vsock | Discussion
+| `connstat` | yes | See <<sec-connstat>>
+| `flowadm` | no | See <<sec-flowad>>
+| `ipf` | no | See <<sec-hook>>
+| `netstat` | yes | See <<sec-netstat>>
+| `/proc` and ptools | yes | See <<sec-proc>>
+| `snoop` | no | See <<sec-snoop>>
+|===
+
+[[sec-connstat]]
+CONNSTAT::
+
+https://illumos.org/man/8/connstat[connstat(8)] is generally used today
+to look at statistics for connection-oriented sockets. Based on the work
+we want to do for netstat, it would be fairly reasonable to extend this
+to work with viosock based stream sockets. To do this we would need to
+make the following changes:
++
+* Add a new way to specify the type with a `--type` flag that could
+  indicate that one wants vsock. This would leave the existing `-4` and
+  `-6` flags intact.
+* Change the allowed fields to only cover those that are meaningful for
+  a vsock interface. Specifically this would be `inbytes`, `insegs`,
+  `laddr`, `lport`, `outbytes`, `outsegs`, `raddr`, `rport`, and
+  `state`.
+* The existing filters would work; however, the local and remote
+  addresses would be CIDs and not IP addresses.
+
+[[sec-flowadm]]
+FLOWADM::
+
+https://illumos.org/man/8/flowadm[`flowadm(8)`] generally manipulates a
+series of layer 2-4 flows and is generally designed to interface with
+`mac(4D)`. While in theory flowadm could be extended to manipulate flows
+going over a vsock and is the place to put this if we desire such
+functionality, that is not how we are going to look at this today.
+
+[[sec-netstat]]
+NETSTAT::
+
+https://illumos.org/man/8/netstat[`netsat(8)`] already has support today
+for showing socket information about non-IP based sockets such as UNIX
+Domain sockets. We would need to extend support to cover vsock here.
+Here are the different ways we would want to extend netstat:
++
+* Running `netstat` without arguments would include `AF_VSOCK` data in
+  its won section.
+* Add vsock as an address family to the `-f` flag to indicate
+  `AF_VSOCK`. As the filter form of `-f` is only used with the routing
+  table we would not modify extend the filters for `AF_VSOCK` as there
+  is no routing table equivalent.
+* `netstat -i` and `netstat -I` generally are defined to show
+  information about IP interfaces. While we could say that these other
+  kinds of interfaces shouldn't show up, we think that if someone
+  specifically requests them with `-f vsock` then that would be the time
+  to do so. As we don't have a distinction between the logical and
+  physical interfaces at this time, specifying `-a` would not have an
+  effect.
+* By default we will have no difference between `-n` and not for
+  translating CIDs. We may want to consider having well-known CIDs be
+  translated to strings, but this may be confusing when they can't be
+  resolved in any classical sense.
+* The form of protocol filter (`-P`) here is not clear. We may want to
+  add aliases for `stream`, `seqpacket`, and related. Forcing someone to
+  use `tcp` or `udp` for example, would be very confusing with vsock.
+* We expect `-u` to map things to processes to work the same.
+
+[[sec-proc]]
+/PROC::
+
+The existing `/proc/<pid>/fdinfo/<fd>` contains an existing `pr_misc`
+element that has a number of entries related to things like
+`PR_SOCKETNAME` and related. We expect all of the relevant miscellaneous
+data types to be honored as summarized by the following table:
++
+.Supported prfdinfo_t Miscellaneous Data
+|===
+| Option | Supported | Notes
+| PR_PATHNAME | No | Not applicable to `AF_VSOCK`
+| PR_SOCKETNAME | Yes | -
+| PR_PEERSOCKNAME | Yes | -
+| PR_SOCKOPTS_BOOL_OPTS | Yes | -
+| PR_SOCKOPT_LINGER | Yes | For relevant types.
+| PR_SOCKOPT_SNDBUF | Yes | -
+| PR_SOCKOPT_RCVBUF | Yes | -
+| PR_SOCKOPT_IP_NEXTHOP | No | IP-specific.
+| PR_SOCKOPT_IPV6_NEXTHOP | No | IP-specific.
+| PR_SOCKOPT_TYPE | Yes | -
+| PR_SOCKOPT_TCP_CONGESTION | No | TCP-specific.
+| PR_SOCKFILTERS_PRIV | Yes | -
+|===
++
+Additional information about the state of an `AF_VSOCK` backend
+transport buffer space may be added.
+
+=== Packaging
+
+We propose that initially a single package that is either
+`driver/network/vsock` or `network/vsock` be added that contains:
+
+* The core vsock framework driver
+* The virtio and loopback backend drivers
+* the vsockadm command and any library that is added
+* The `soconfig` data files
+
+It is recommended that this package be installed by default.
+
+== Implementation Plan
+
+This project proposes specifically implementing:
+
+* Support for `AF_VSOCK` as a common socket engine with general
+  compatibility with the Linux implementation as much as is practical.
+** We will not be 100% ABI compatible, but will be as source compatible
+as we practically can.
+* A `virtio-sock` based backend and a loopback backend
+* Implementing basic zone awareness via the `netstack_t`
+* A `vsockadm` binary to get vsock-specific information
+** A libvsock may or may not be created as part of this effort
+* Adding a DTrace `vsock` provider
+* Extending `connstat` and `netstat` to cover `vsock`
+* Providing a reasonable test suite that can execute against the
+  loopback transport
+
+The following things are explicitly out of scope for this initial
+effort:
+
+* Firewall hooks and subsequent IPF support
+* Packet capture tie-ins
+* Support for some of the more involved socket options

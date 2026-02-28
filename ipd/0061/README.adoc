@@ -2,7 +2,7 @@
 :toc: left
 :numbered:
 :icons: font
-:state: predraft
+:state: draft
 :revremark: State: {state}
 :authors: Robert Mustacchi <rm@fingolfin.org>
 :sponsor:
@@ -30,19 +30,22 @@ to make, and some rough notes on the overall structure here.
 == Background
 
 The `AF_VSOCK` provides a transport between a guest and a hypervisor.
-Where as our normal networks are identified by IP addresses, different
+Whereas our normal networks are identified by IP addresses, different
 entities are identified by opaque unsigned 32-bit context IDs called
 CIDs. There are a few well known CIDs in the system:
 
-* `VMADDR_CID_ANY` (`UINT32_MAX`): this CID basically says bind to any CID.
-  Generally applications are encouraged to do this to avoid needing to
-  know about the current CID.
-* `VMADDR_CID_HYPERVISOR` (0): This says to talk to services in the
-  hypervisor.
-* `VMADDR_CID_LOCAL` (1): This says to talk to the local virtual
-  machine. Effectively it is a loopback address.
-* `VMADDR_CID_HOST` (2): This says to talk to the host that is running
-  the virtual machine.
+* `VMADDR_CID_ANY` (`UINT32_MAX`): this CID represents any CID, similar
+  to the use of `INADDR_ANY`. Generally applications are encouraged to
+  do this to avoid needing to know about the current CID.
+* `VMADDR_CID_HYPERVISOR` (0): This CID represents the hypervisor that
+  is running a virtual machine. It is not defined in all transport
+  protocols.
+* `VMADDR_CID_LOCAL` (1): This CID represents the local network stack.
+  This is a loopback address (e.g. `127.0.0.1` in IPv4.)
+* `VMADDR_CID_HOST` (2): This CID represents the host that is running
+  the virtual machine. `VMADDR_CID_HYPERVISOR` is supposed to represent
+  the hypervisor itself, whereas  `VMADDR_CID_HOST` is used for all
+  other services on the host.
 
 The transport specifications generally only define a subset of these as
 well known CIDs. For example, the virtio spec leaves values of 0 and 1
@@ -50,8 +53,8 @@ reserved and only defines `VMADDR_CID_HOST`.
 
 On top of this, ports are used, just like in IP. The system is supposed
 to treat ports below 1024 as privileged ports. Similar to other network
-endpoints, a port value of -1, `VMADDR_PORT_ANY` should be used for
-binding to any port.
+endpoints, a port value of `UINT_MAX` (`-1U`), `VMADDR_PORT_ANY` should
+be used for binding to any port.
 
 The different hypervisor transports support different kinds of socket
 types. The following table summarizes the different types of socket
@@ -111,7 +114,7 @@ zero, there is no logic in Linux that enforces it today.
 
 Local CID discovery is performed on Linux by performing an ioctl on the
 `/dev/vsock` device using the `IOCTL_VM_SOCKETS_GET_LOCAL_CID` command.
-This is the only currently defined means of getting this information. 
+This is the only currently defined means of getting this information.
 
 === Local CID Assignment
 
@@ -182,7 +185,7 @@ are intended to be:
 * Loopback
 
 In general, the goal will be to have as much of the overall data that we
-require and logic for dealing withe `sockfs` and related in the general
+require and logic for dealing with `sockfs` and related in the general
 `vsock` code and then use a backend-specific transport driver. Just like
 other protocols, this will tie into a zone's netstack using a new
 protocol structure, most likely a `struct vsock_stack`. Connections will
@@ -235,8 +238,12 @@ use the next available AF value, which is currently 33. Note, this value
 is not compatible with Linux's default value. Unfortunately it's
 generally difficult and these values are going to always end up being
 OS-specific. There are not generally gaps in the AF space with the
-definition of `AF_MAX. Even if we wanted to pick say the Linux value of
-`AF_VSOCK` as 40, other OSes have used that value.
+definition of `AF_MAX`. Other operating systems already have other
+values for address family 40: FreeBSD uses it for `AF_INET_SDP`. This
+means that no matter what we do, software already has to treat this
+constant as an operating system specific value and even if we pick the
+same value as Linux today, there will still be broader portability
+challenges.
 
 . To contain all of the various vsock related constants we need a header
 file to define the socket address format and related. On Linux this is
@@ -261,11 +268,11 @@ sa_family_t    svm_family;    /* Address family: AF_VSOCK */
 unsigned short svm_reserved1;
 unsigned int   svm_port;      /* Port # in host byte order */
 unsigned int   svm_cid;       /* Address in host byte order */
-unsigned char  svm_zero[sizeof(struct sockaddr) -
-		       sizeof(sa_family_t) -
-		       sizeof(unsigned short) -
-		       sizeof(unsigned int) -
-		       sizeof(unsigned int)];
+unsigned char  svm_zero[sizeof (struct sockaddr) -
+		       sizeof (sa_family_t) -
+		       sizeof (unsigned short) -
+		       sizeof (unsigned int) -
+		       sizeof (unsigned int)];
 };
 ----
 +
@@ -287,7 +294,7 @@ field at the start of the `svm_zero`.
 . For compatibility purposes, we will implement similar socket options
 to those that Linux implements today and actually has definitions for.
 These will use the same values for the options. In addition, we will use
-the same source-compatible level `AF_UNIX`, though this has a distinct
+the same source-compatible level `AF_VSOCK`, though this has a distinct
 ABI value per the earlier discussion. Any illumos-specific socket
 options that we opt to add will use their own level: `SOL_VSOCK` to give
 us a different namespace to ensure we don't end up conflicting. The
@@ -312,9 +319,21 @@ communicated over the transport, we view this as basically another way
 to phrase the existing send and receive buffer and not the creation of a
 second set of allocated space for this system. Effectively, our initial
 proposal is that setting `SO_VM_SOCKETS_BUFFER_SIZE` be equivalent to
-setting `SO_SNDBUF` and `SO_RCVBUF` on the socket. The tuning we should
-allow on the MIN and MAX isn't clear. There likely need to be stack-wide
-defaults. What tuning-is allowed is not clear.
+setting both `SO_SNDBUF` and `SO_RCVBUF` on the socket. The individual
+options still exist, see the following section.
+
+The tuning we should allow on the MIN and MAX isn't clear. There likely
+need to be stack-wide defaults. What tuning should be allowed is not
+clear.
+
+`SOL_VSOCK` is the name of the same constant that is used on Linux for
+csmg data. The socket option level generally matches the IP protocol.
+However the current ABI value in Linux for `SOL_VSOCK` is 287. As this
+is above the defalut ste of IP protocols, we propose to adopt this
+value for our definition of `SOL_VSOCK` to avoid spurious differences.
+ohterwise the next traditional value to use would be `0xfffb` as we
+work down from `0xffff` for levels that don't actually correspond to an
+IP protocol. This definition will be in `<sys/socket.h>`.
 
 ==== Standard Socket Options
 
@@ -429,7 +448,7 @@ used are dependent on the transport providers, this makes some sense.
 However, this then means things like observability become challenging.
 In addition, while it would be quite strange to have more than one
 transport backend, it is is strictly possible with virtio appearing as a
-PCI device, albeit it would be quite odd.
+PCI device.
 
 To make this subsystem more understandable, we propose the idea of
 having named transport-based devices which one can discover an address
@@ -582,7 +601,7 @@ The following table summarizes the probes that we will add:
 | Probe | Type | Description
 | send | all | Fires whenever a packet is transmitted over an interface,
 including loopback.
-| recieve | all | Fires whenever a packet is received over an interface,
+| receive | all | Fires whenever a packet is received over an interface,
 including loopback.
 | accept-established | connection-oriented | Fires whenever a listening
 socket successfully accepts a new connection.
@@ -659,7 +678,7 @@ a longer discussion:
 |===
 | Tool | vsock | Discussion
 | `connstat` | yes | See <<sec-connstat>>
-| `flowadm` | no | See <<sec-flowad>>
+| `flowadm` | no | See <<sec-flowadm>>
 | `ipf` | no | See <<sec-hook>>
 | `netstat` | yes | See <<sec-netstat>>
 | `/proc` and ptools | yes | See <<sec-proc>>
@@ -703,7 +722,7 @@ Domain sockets. We would need to extend support to cover vsock here.
 Here are the different ways we would want to extend netstat:
 +
 * Running `netstat` without arguments would include `AF_VSOCK` data in
-  its won section.
+  its own section.
 * Add vsock as an address family to the `-f` flag to indicate
   `AF_VSOCK`. As the filter form of `-f` is only used with the routing
   table we would not modify extend the filters for `AF_VSOCK` as there
@@ -719,9 +738,15 @@ Here are the different ways we would want to extend netstat:
   translating CIDs. We may want to consider having well-known CIDs be
   translated to strings, but this may be confusing when they can't be
   resolved in any classical sense.
-* The form of protocol filter (`-P`) here is not clear. We may want to
-  add aliases for `stream`, `seqpacket`, and related. Forcing someone to
-  use `tcp` or `udp` for example, would be very confusing with vsock.
+* Sometimes folks will use the -P flag to limit information to a
+  specific protocol such as `tcp` or `udp`. There is no similar notion
+  of protocols for the `AF_VSOCK` socket family, though there are
+  different socket types. This lack of a distinction may mean that that
+  it doesn't make sense to do anything here for the -P style filtering.
+  As we design the mib2 style information for the `-s` interface, this
+  will help inform if there is anything that makes sense to extend here,
+  particularly if we want to distinguish the different socket types
+  which works for IP due to the use of different protocols.
 * We expect `-u` to map things to processes to work the same.
 
 [[sec-proc]]

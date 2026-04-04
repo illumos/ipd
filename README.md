@@ -73,6 +73,8 @@ information is available at the end of this document.
 | published | [IPD 59 Sysroots](./ipd/0059/README.adoc)
 | predraft  | [IPD 60 Generalized Regspecs, PCIe Segments, and ACPI Root Nexus](./ipd/0060/README.adoc)
 | draft     | [IPD 61 AF_VSOCK support](./ipd/0061/README.adoc)
+| predraft  | IPD 62 unet
+| predraft  | IPD 63 Fixing LC_GLOBAL_LOCALE races
 
 ## Contributing
 

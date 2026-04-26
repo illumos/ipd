@@ -1,0 +1,424 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Andy Fiddaman <illumos@fiddaman.net>
+:sponsor:
+:source-highlighter: pygments
+:stem: latexmath
+ifdef::env-github[]
+:tip-caption: :bulb:
+:note-caption: :information_source:
+:important-caption: :heavy_exclamation_mark:
+:caution-caption: :fire:
+:warning-caption: :warning:
+endif::[]
+
+= IPD 64 A Native spawn(2) System Call
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+Almost every process on the system begins its life through some
+combination of fork and exec. Over the years, several attempts have
+been made to reduce the overhead of this sequence, from `vfork(2)` in
+BSD to `posix_spawn(3C)` in POSIX. Today, the illumos implementation
+of `posix_spawn(3C)` remains a library wrapper around `vfork(2)` and
+`execve(2)`, inheriting the scalability problems of both.
+
+This IPD proposes the introduction of a native `spawn(2)` system call
+that combines process creation and program execution into a single
+kernel operation. By avoiding the intermediate address space sharing
+and thread serialisation that `vfork(2)` requires, a kernel-level
+spawn can offer better performance and scalability, especially for
+multi-threaded processes that have a large number of threads or
+spawn children concurrently.
+
+== Background
+
+=== Process Creation on Unix
+
+The original mechanism for starting a new process on Unix is the
+`fork(2)` and `exec(2)` pair. The parent calls `fork(2)` to create a
+copy of itself and the child then calls `exec(2)` to replace its
+address space with a new program. This model carries significant cost
+because `fork(2)` must duplicate the entire address space of the
+parent. Even with copy-on-write optimisations for the page tables,
+this becomes increasingly expensive as the parent process grows
+larger. On illumos the cost is compounded since the kernel must
+duplicate any swap reservations -- a `fork(2)` from a large process
+can transiently require twice the swap that the parent alone needs.
+
+`vfork(2)` was introduced in BSD as a cheaper alternative. Rather than
+duplicating the address space, the child runs directly in the parent's
+address space. The parent is suspended until the child either calls
+`exec(2)` or `_exit(2)`. This gets around page table copying and swap
+reservation, but introduces its own problems. Since the child shares
+the parent's memory, it must not modify data or call functions that
+might corrupt the parent's state. The window between `vfork(2)` and
+`exec(2)` is therefore very constrained. Dynamic linking complicates
+things further because, if another thread in the parent held the
+dynamic linker's lock when `vfork(2)` was called, that lock is now
+owned by a defunct thread. Any attempt by the child to resolve a
+symbol will deadlock.
+
+On illumos, both `fork(2)` and `vfork(2)` are implemented through the
+`forksys` system call (`SYS_forksys`, 142). Before the child process
+can be created, the kernel must stop all other LWPs in the parent
+process via `holdlwps()` and wait for them to reach a safe point. For
+`fork(2)`, this is necessary so that kernel stacks can be cloned. For
+`vfork(2)`, the child is borrowing the parent's address space, so other
+threads must not be allowed to modify it concurrently. In either case,
+every thread in the parent process must be stopped before the operation
+can proceed. The more threads a process has, the longer this takes.
+
+=== posix_spawn(3C)
+
+The `posix_spawn(3C)` interface was introduced in POSIX to provide a
+way to create a new process and execute a program in a single logical
+operation. It was originally motivated by the needs of embedded
+systems without an MMU, where `fork(2)` cannot be implemented at all,
+but it has since seen wide adoption as a general-purpose process
+creation API.
+
+POSIX defines two entry points: `posix_spawn(3C)`, which takes an
+explicit path to the executable, and `posix_spawnp(3C)`, which
+searches the `PATH` environment variable. Both allow the caller to
+specify a limited but well-defined set of operations to be performed
+between process creation and program execution, expressed as _file
+actions_ and _spawn attributes_. File actions describe operations on
+file descriptors: open, close, dup2, closefrom, chdir, and fchdir.
+Spawn attributes control process properties such as the signal mask,
+signal dispositions, process group, scheduling parameters, and session
+membership. illumos also provides several non-portable extensions
+(denoted by the `_NP` suffix):
+
+* `POSIX_SPAWN_SETSIGIGN_NP` -- set specified signals to `SIG_IGN`
+* `POSIX_SPAWN_NOSIGCHLD_NP` -- do not post `SIGCHLD` to the parent
+* `POSIX_SPAWN_WAITPID_NP` -- child is not waitable by the parent
+  unless explicitly via `waitpid(2)`
+* `POSIX_SPAWN_NOEXECERR_NP` -- on exec failure, exit with status 127
+  rather than reporting the error to the parent
+
+Since the permitted operations are constrained, the intermediate child
+process does not need to be exposed to the caller.
+
+=== Current illumos Implementation
+
+The current illumos `posix_spawn(3C)` is implemented entirely in libc,
+and works as follows:
+
+. If any file actions require `closefrom`, a directory buffer is
+  pre-allocated (since memory cannot be allocated after `vfork(2)`).
+. `vforkx(2)` is called with flags derived from the spawn attributes
+  (`FORK_NOSIGCHLD`, `FORK_WAITPID`).
+. In the child, spawn attributes are applied (signal masks, process
+  group, scheduling parameters, et al.).
+. File actions are executed in order.
+. `execve(2)` is called with the specified path, arguments, and
+  environment.
+. If `execve(2)` fails, the child exits with a special `_EVAPORATE`
+  status that allows the parent to distinguish exec failure from
+  successful child termination.
+
+Because the implementation is built on `vfork(2)`, it inherits all of
+the problems described above. In particular:
+
+* All other LWPs in the parent must be stopped before the child can be
+  created. This serialises all `posix_spawn(3C)` calls against every
+  other thread in the process.
+* The child executes in the parent's address space, so all functions
+  called between `vfork(2)` and `execve(2)` must be internal to libc
+  and must not be exported as global symbols, to avoid invoking the
+  dynamic linker.
+* Only one `vfork(2)` child can be active at a time per process,
+  since there is only one address space to lend. Multiple threads
+  calling `posix_spawn(3C)` concurrently must wait their turn.
+
+Benchmarking a multi-threaded process that repeatedly spawns
+`/bin/true` shows that adding threads yields almost no improvement in
+spawn rate. The bottleneck is the `holdlwps()` / `continuelwps()`
+cycle as each spawn must wait for every other LWP to stop and then
+restart them all afterwards.
+
+== Proposal
+
+This IPD proposes the introduction of a new `spawn(2)` system call
+that performs process creation and program execution as a single
+atomic kernel operation. The libc implementation of `posix_spawn(3C)`
+will be updated to use this system call rather than the current
+`vfork(2)` + `execve(2)` approach. During implementation and testing,
+both implementations could co-exist and be selected via a mechanism
+such as an environment variable.
+
+=== Advantages of spawn(2)
+
+The new system call will share substantial code with the existing
+`cfork()` and `exec_common()` kernel paths but will avoid the
+following operations that are unnecessary when the goal is to create a
+new process running a new program:
+
+* There is no need to stop other LWPs via
+  `holdlwps()`. The parent's address space is not being shared with or
+  copied to the child.
+* There is no need to duplicate the parent's address space.
+  The child will get a fresh address space populated by `exec`.
+* Watchpoint manipulation can be avoided entirely. `vfork(2)` must
+  clear watchpoints on the shared address space and restore them later.
+* There are no shared memory segments to duplicate or share.
+* No need to clone threads/LWPs; the kernel creates a single new LWP
+  for the child directly.
+* The parent's full file descriptor table need not be copied wholesale.
+  See <<sec-fd>> for more discussion.
+
+The combined effect of skipping these steps leads to a faster and
+more scalable process creation path. Multiple threads in the same
+process can call `spawn(2)` concurrently; the only serialisation is on
+the locks that must be held briefly during process creation (the PID
+and file descriptor table, for example).
+
+=== High-Level Operation
+
+At a high level, the `spawn(2)` system call will proceed as follows:
+
+. The kernel copies the argument vector, environment vector, file
+  actions, and spawn attributes from the caller's address space into
+  kernel memory. This must happen early because the parent's address
+  space will not be available to the child.
+. A new process structure is created and initialised from the parent,
+  inheriting credentials, resource controls, the contract template, and
+  other process-level properties.
+. The spawn attributes are applied: signal mask, signal dispositions,
+  process group, scheduling parameters, session, etc.
+. File descriptors are set up for the child, either by copying the
+  parent's table and then applying file actions, or by constructing
+  the child's table directly. See <<sec-fd>>.
+. The specified program is loaded and executed in the new process's
+  address space, as with `exec`.
+. If the exec succeeds, the system call returns in the parent with the
+  child's PID. If the exec fails, the child is torn down and the error
+  is returned to the parent.
+
+The parent does not need to wait for the child to exec before it can
+resume. However, the system call itself is synchronous; it does not
+return until the child has either successfully begun executing the new
+program or failed. This preserves the existing `posix_spawn(3C)` error
+reporting semantics where exec failures can be communicated to the
+caller as an error return, except when `POSIX_SPAWN_NOEXECERR_NP` is
+set.
+
+[[sec-fd]]
+=== File Descriptor Handling
+
+One of the more interesting considerations is how file descriptors are
+handled. The current `vfork(2)` approach gives the child direct access
+to the parent's file descriptor table. File actions (open, close,
+dup2, etc.) are executed in the child, which can  access the parent's
+descriptors directly. This works because the parent is suspended
+throughout.
+
+With a native `spawn(2)`, we need to construct the child's file
+descriptor table without suspending the parent. There are a couple
+of different ways to handle this:
+
+. Take a snapshot of the parent's file descriptor table under a lock,
+  then apply the file actions to the snapshot. This provides a
+  consistent point-in-time view of the parent's descriptors. The lock
+  need only be held for the duration of the snapshot, not for the entire
+  spawn operation.
+
+. Rather than copying the entire table,
+  build the child's file descriptor table by examining only the
+  descriptors that are needed: those referenced by file actions and
+  those not marked close-on-exec. This could be more efficient for
+  processes with very large descriptor tables where most descriptors are
+  close-on-exec.
+
+A third possibility of implementing some kind of copy-on-write scheme
+for the file descriptor table is not considered viable as it would
+require changes to file descriptor handling throughout the kernel and
+the complexity would far outweigh any benefit for this use case.
+
+The choice between these approaches has implications for the consistency
+guarantees we provide. POSIX requires that the set of file descriptors
+available to the spawned process be as if a `fork(2)` had occurred
+followed by the specified file actions. What happens if another thread
+opens or closes a file descriptor concurrently with the `spawn(2)`
+call is not fully specified by POSIX.
+
+=== The libc/Kernel Boundary
+
+Not all of the work currently done by the libc `posix_spawn(3C)` needs
+to move into the kernel, and some work must remain in userland. The
+division of responsibilities is expected to be:
+
+==== Before the system call (in libc, parent context)
+
+* Validation of arguments, spawn attributes, and file actions.
+* `posix_spawnp(3C)` PATH resolution. The `posix_spawnp(3C)` variant
+  searches `PATH` for the executable and this is most likely better
+  done in libc, although multiple calls into the new `spawn(2)`
+  may be necessary; details of this need to be worked through.
+* Marshalling the file actions and spawn attributes into a form
+  suitable for the system call.
+
+==== In the kernel
+
+* Process creation.
+* Application of spawn attributes (signals, process group, scheduling,
+  session).
+* File descriptor table construction and file action execution.
+* Program loading and execution (`exec`).
+* Error reporting back to the parent.
+
+==== After the system call (in libc, parent context)
+
+* Setting `errno` and returning the appropriate value (inc. child
+  PID).
+
+The above will no doubt be refined during implementation.
+
+=== System Call Number
+
+Solaris implemented a `spawn` system call at syscall number 2. This
+is the slot historically occupied by `SYS_fork`, which became available
+after the fork variants were consolidated into `SYS_forksys` (142).
+
+It is worth considering whether reusing the Solaris number would be
+beneficial. Some software, such as the Go runtime and tools like
+valgrind, references system call numbers directly and, in principle,
+sharing a number could reduce the porting burden for such software. In
+practice, however, these tools already need to distinguish between
+Solaris and illumos; the system call tables have diverged in many
+places and the interface contract of any new `spawn(2)` will be
+illumos-specific. Using the same number as Solaris would risk tools
+applying incorrect assumptions about the call's arguments and
+semantics.
+
+Regardless, illumos has already repurposed syscall 2 for
+`SYS_psecflags` (process security flags), so the Solaris number could
+not be re-used without displacing an existing system call. A new
+system call number will be allocated during implementation.
+
+== Debugger and Tool Support
+
+The introduction of a new process creation mechanism requires updates to
+several debugging and observability tools. Unlike `fork(2)`, where the
+child initially shares the parent's program text, a successful
+`spawn(2)` produces a child that is already running a different
+executable in its own address space. Tools that follow process creation
+must account for this, and must also consider that the spawned program
+may have different credentials, privileges and authorisations.
+
+=== proc(7)
+
+The `/proc` filesystem is the primary mechanism for process
+observation and control. The `spawn(2)` system call will need to
+generate appropriate `/proc` stop events so that debuggers can
+intercept the new process. The existing `PR_SYSEXIT` mechanism for
+`SYS_forksys` could be used for this. A debugger that is set to stop
+on fork events will also need to be able to stop on spawn events.
+However, by the time the debugger can observe the child, it is already
+running the new program and there is no window in which the child
+exists with the parent's address space.
+
+=== truss(1)
+
+`truss(1)` needs to learn about the new system call so that it can
+trace spawn operations and optionally follow the child process. As
+with `/proc`, the main consideration is that spawned children start
+life in a new program rather than as a copy of the parent.
+
+=== mdb(1)
+
+`mdb(1)` will likely need updates to its process target to correctly
+handle spawn events. There exist separate variables to control debugger
+behaviour on `fork(2)`, and on `exec(2)`; a similar control may be
+required for `spawn(2)`.
+
+=== DTrace
+
+The existing `proc` DTrace provider includes probes for `create` (fork)
+and `exec`. A `spawn(2)` call is logically both of these in a single
+operation. The appropriate way to instrument this could be a new probe,
+or firing both existing probes, or a combination. This will be
+determined during implementation. Whatever approach is taken, it must
+be possible for DTrace consumers to observe spawn events and extract
+the same metadata that is available for fork and exec today. For
+example, the parent and child PIDs, and the executable path.
+
+=== Auditing
+
+The BSM audit subsystem records events for both `fork(2)` (events
+`AUE_FORK1`, `AUE_FORKALL`, `AUE_VFORK`) and `exec(2)` (`AUE_EXECVE`).
+The new `spawn(2)` system call will need a new audit event
+(`AUE_SPAWN`?) so that audit trails correctly reflect process creation.
+As a minimum, the following will need to be updated:
+
+* Addition of the new audit event;
+* An update to the kernel auditing code to record details of the spawn
+  operation such as the path, arguments and errors/child PID;
+* Updates to `auditreduce(8)` and `praudit(8)` so that the new
+  event can be filtered, parsed, and printed;
+* Updates to the syslog audit plugin and the BSM XML definitions.
+
+Since `spawn(2)` combines what are currently two separately audited
+operations (fork and exec), we must ensure that the new single audit
+record captures sufficient information for both purposes.
+
+== Consumers
+
+A practical advantage of this work is that many programs already use
+`posix_spawn(3C)`:
+
+* `ksh93` -- the default illumos shell uses `posix_spawn(3C)` to
+  launch external commands. This means that shell scripts and
+  interactive shell sessions will benefit immediately from the
+  performance improvement.
+* `popen(3C)` and `system(3C)` -- these library functions are
+  implemented in terms of `posix_spawn(3C)`.
+* SMF (the Service Management Facility) uses `posix_spawn(3C)` to
+  start services.
+
+Because the `spawn(2)` system call will be used transparently through
+the existing `posix_spawn(3C)` API, no changes to these consumers are
+required.
+
+However, as a followup to this work, other system components,
+particularly any that routinely spawn a lot of sub-processes
+(for example `dmake(1)`), should be considered for migration
+to use `posix_spawn(3C)`.
+
+== Testing
+
+The existing `posix_spawn` test suite was recently expanded and tests
+against the `posix_spawn(3C)` API rather than the implementation. The
+same tests must continue to pass when the underlying implementation
+switches from `vfork(2)` + `execve(2)` to the native `spawn(2)`.
+
+Additional tests will be added to exercise concurrency scenarios that
+are expected to improve, such as multiple threads spawning children
+simultaneously.
+
+== Documentation
+
+A new `spawn(2)` man page will be written documenting the system call
+interface.
+
+== Open Questions
+
+. What level of consistency must the child's initial file descriptor
+  set provide with respect to concurrent modifications by other threads
+  in the parent? The POSIX wording needs reviewing.
+
+. Branded zones (such as the LX brand in some distributions) may have
+  their own expectations around process creation. The interaction
+  between `spawn(2)` and the brand framework needs to be considered.
+

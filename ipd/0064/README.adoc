@@ -69,15 +69,18 @@ dynamic linker's lock when `vfork(2)` was called, that lock is now
 owned by a defunct thread. Any attempt by the child to resolve a
 symbol will deadlock.
 
-On illumos, both `fork(2)` and `vfork(2)` are implemented through the
-`forksys` system call (`SYS_forksys`, 142). Before the child process
-can be created, the kernel must stop all other LWPs in the parent
-process via `holdlwps()` and wait for them to reach a safe point. For
-`fork(2)`, this is necessary so that kernel stacks can be cloned. For
-`vfork(2)`, the child is borrowing the parent's address space, so other
-threads must not be allowed to modify it concurrently. In either case,
-every thread in the parent process must be stopped before the operation
-can proceed. The more threads a process has, the longer this takes.
+On illumos, all fork variants are implemented through the `forksys`
+system call (`SYS_forksys`, 142). This covers POSIX `fork(2)` which
+duplicates only the calling thread (fork-one semantics), the older
+`forkall(2)` which duplicates every LWP, and `vfork(2)`. Before the
+child process can be created, the kernel must stop all other LWPs in
+the parent process via `holdlwps()` and wait for them to reach a safe
+point. For `fork(2)`, this is necessary so that kernel stacks can be
+cloned and for `vfork(2)`, the child is borrowing the parent's address
+space, so other threads must not be allowed to modify it concurrently.
+In every case, every thread in the parent process must be stopped
+before the operation can proceed. The more threads a process has, the
+longer this takes.
 
 === posix_spawn(3C)
 
@@ -234,12 +237,11 @@ of different ways to handle this:
   need only be held for the duration of the snapshot, not for the entire
   spawn operation.
 
-. Rather than copying the entire table,
-  build the child's file descriptor table by examining only the
-  descriptors that are needed: those referenced by file actions and
-  those not marked close-on-exec. This could be more efficient for
-  processes with very large descriptor tables where most descriptors are
-  close-on-exec.
+. Rather than copying the entire table, build the child's file
+  descriptor table by examining only the descriptors that are needed
+  (those referenced by file actions and those not marked close-on-fork).
+  This could be more efficient for processes with very large
+  descriptor tables.
 
 A third possibility of implementing some kind of copy-on-write scheme
 for the file descriptor table is not considered viable as it would
@@ -247,11 +249,23 @@ require changes to file descriptor handling throughout the kernel and
 the complexity would far outweigh any benefit for this use case.
 
 The choice between these approaches has implications for the consistency
-guarantees we provide. POSIX requires that the set of file descriptors
-available to the spawned process be as if a `fork(2)` had occurred
-followed by the specified file actions. What happens if another thread
-opens or closes a file descriptor concurrently with the `spawn(2)`
-call is not fully specified by POSIX.
+guarantees we provide. What happens if another thread opens or closes
+a file descriptor concurrently with the `spawn(2)` call is not fully
+specified by POSIX.
+
+Since `spawn(2)` is logically equivalent to a fork followed by an
+exec, both close-on-fork and close-on-exec need to be honoured, but
+handled at different stages. The wording in POSIX states that file
+actions must be applied *as if* in the new process, and then any
+file descriptors *from this new set* which are flagged for
+close-on-exec must be closed. It is legitimate for a file action to
+reference a descriptor that would later be closed on `exec(2)`.
+We must therefore:
+
+. Copy the parent's descriptor table, excluding any descriptors
+  marked as close-on-fork;
+. Apply the file actions in order;
+. Close any remaining descriptors that are flagged for close-on-exec.
 
 === The libc/Kernel Boundary
 
@@ -280,10 +294,17 @@ division of responsibilities is expected to be:
 
 ==== After the system call (in libc, parent context)
 
-* Setting `errno` and returning the appropriate value (inc. child
-  PID).
+* Returning the child PID, or an error as applicable.
 
 The above will no doubt be refined during implementation.
+
+=== Privileges
+
+The existing fork and exec paths check separate basic privileges,
+`PRIV_PROC_FORK` and `PRIV_PROC_EXEC`. Since `spawn(2)` performs
+both operations it must require both privileges. A process that has
+been denied either one must not be able to use `spawn(2)` to bypass
+that restriction.
 
 === System Call Number
 
@@ -320,14 +341,36 @@ may have different credentials, privileges and authorisations.
 === proc(7)
 
 The `/proc` filesystem is the primary mechanism for process
-observation and control. The `spawn(2)` system call will need to
-generate appropriate `/proc` stop events so that debuggers can
-intercept the new process. The existing `PR_SYSEXIT` mechanism for
-`SYS_forksys` could be used for this. A debugger that is set to stop
-on fork events will also need to be able to stop on spawn events.
-However, by the time the debugger can observe the child, it is already
-running the new program and there is no window in which the child
-exists with the parent's address space.
+observation and control. As with the DTrace probes, existing
+`/proc`-based tooling must continue to work and observable behaviour
+should match what consumers see today for an equivalent
+`fork(2)` + `exec(2)` pair.
+
+In the parent, `spawn(2)` is an ordinary system call and is subject to
+the existing `PR_SYSENTRY` / `PR_SYSEXIT` stop mechanisms.
+
+In the child, the behaviour is the same as if `exec` had been called:
+
+* All tracing flags are reset, with the exception of `PR_RLC`
+  (run-on-last-close), matching the existing `exec` semantics.
+* Watchpoints and breakpoints are cleared, since the child has a new
+  address space.
+* `/proc/<pid>/psinfo`, `/proc/<pid>/status`, and the auxv reflect the
+  new program from the moment the child becomes observable.
+
+A debugger that has `PR_FORK` set on the parent will be able to attach
+to the child in the usual way; however, unlike `fork(2)`, the child
+becomes observable only after the new program image has been loaded.
+There is no intermediate state in which the child exists with the
+parent's address space or executable.
+
+To enforce this, a new process flag (provisionally `SSPAWNING`) will
+be set on the child while the spawn is in progress, alongside the
+existing flags such as `SFORKING` and `SEXECED`. While `SSPAWNING`
+is set, libproc-style control operations on the child must fail or
+block since the process is only partially constructed. The flag will
+be cleared once the child reaches the same state it would have after a
+completed `exec`, at which point normal `/proc` semantics apply.
 
 === truss(1)
 
@@ -345,14 +388,19 @@ required for `spawn(2)`.
 
 === DTrace
 
-The existing `proc` DTrace provider includes probes for `create` (fork)
-and `exec`. A `spawn(2)` call is logically both of these in a single
-operation. The appropriate way to instrument this could be a new probe,
-or firing both existing probes, or a combination. This will be
-determined during implementation. Whatever approach is taken, it must
-be possible for DTrace consumers to observe spawn events and extract
-the same metadata that is available for fork and exec today. For
-example, the parent and child PIDs, and the executable path.
+The `proc` provider's probes are committed interfaces and existing
+consumers must continue to observe spawn events through them without
+modification. A `spawn(2)` call is logically a fork followed by an
+exec, so it will fire the same probes as that sequence would:
+
+* `proc:::create` when the child process is created, with the standard
+  arguments identifying the parent and child.
+* `proc:::exec` when the new program image is about to be loaded.
+* `proc:::exec-success` or `proc:::exec-failure` according to the
+  outcome.
+
+No new probes are proposed. In particular, no probe that duplicates
+the semantics of `exec-success` will be added.
 
 === Auditing
 
@@ -378,11 +426,11 @@ record captures sufficient information for both purposes.
 A practical advantage of this work is that many programs already use
 `posix_spawn(3C)`:
 
-* `ksh93` -- the default illumos shell uses `posix_spawn(3C)` to
+* The default illumos shell (ksh93) uses `posix_spawn(3C)` to
   launch external commands. This means that shell scripts and
   interactive shell sessions will benefit immediately from the
   performance improvement.
-* `popen(3C)` and `system(3C)` -- these library functions are
+* The `popen(3C)` and `system(3C)` library functions are
   implemented in terms of `posix_spawn(3C)`.
 * SMF (the Service Management Facility) uses `posix_spawn(3C)` to
   start services.
@@ -409,8 +457,9 @@ simultaneously.
 
 == Documentation
 
-A new `spawn(2)` man page will be written documenting the system call
-interface.
+`spawn(2)` will be a private interface. A brief `spawn(2)` man page
+may be written describing the system call in high level terms, but
+not the underlying interface.
 
 == Open Questions
 
@@ -421,4 +470,8 @@ interface.
 . Branded zones (such as the LX brand in some distributions) may have
   their own expectations around process creation. The interaction
   between `spawn(2)` and the brand framework needs to be considered.
+
+. There may be benefit to implementing the path search required for
+  the `posix_spawnp(3C)` variant in the kernel rather than libc.
+  Benchmarking during development will help inform here.
 

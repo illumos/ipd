@@ -29,8 +29,8 @@ endif::[]
 Almost every process on the system begins its life through some
 combination of fork and exec. Over the years, several attempts have
 been made to reduce the overhead of this sequence, from `vfork(2)` in
-BSD to `posix_spawn(3C)` in POSIX. Today, the illumos implementation
-of `posix_spawn(3C)` remains a library wrapper around `vfork(2)` and
+BSD to `posix_spawn(3C)` in POSIX. Today, illumos implements
+`posix_spawn(3C)` as a library function, wrapping `vfork(2)` and
 `execve(2)`, inheriting the scalability problems of both.
 
 This IPD proposes the introduction of a native `spawn(2)` system call
@@ -81,6 +81,10 @@ space, so other threads must not be allowed to modify it concurrently.
 In every case, every thread in the parent process must be stopped
 before the operation can proceed. The more threads a process has, the
 longer this takes.
+
+Having to wait for all threads to return from the kernel also provides
+some interesting
+https://www.illumos.org/issues/17688[opportunities for deadlocks].
 
 === posix_spawn(3C)
 
@@ -146,10 +150,18 @@ the problems described above. In particular:
   calling `posix_spawn(3C)` concurrently must wait their turn.
 
 Benchmarking a multi-threaded process that repeatedly spawns
-`/bin/true` shows that adding threads yields almost no improvement in
-spawn rate. The bottleneck is the `holdlwps()` / `continuelwps()`
-cycle as each spawn must wait for every other LWP to stop and then
-restart them all afterwards.
+`/bin/true`, using a test tool written for the purpose
+(https://github.com/citrus-it/spawnado[spawnado]) of exploring
+posix_spawn performance, shows that adding threads above a certain
+point ends up with the spawn rate decreasing. The bottleneck is the
+`holdlwps()` / `continuelwps()` cycle as each spawn must wait for
+every other LWP to stop and then restart them all afterwards.
+
+.Spawn throughput vs thread count, current implementation
+image::before.png[Spawn throughput vs thread count]
+
+In the run shown above, throughput peaks at around 4800 spawns/sec
+with six threads and falls to roughly 1000 spawns/sec by fifty.
 
 == Proposal
 

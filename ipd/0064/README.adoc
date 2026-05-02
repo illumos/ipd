@@ -279,6 +279,23 @@ We must therefore:
 . Apply the file actions in order;
 . Close any remaining descriptors that are flagged for close-on-exec.
 
+The descriptor table copy is potentially the most expensive part of
+`spawn(2)`, particularly for processes with a large number of open
+descriptors. There is scope for optimisation here by pre-scanning
+the file actions, for example:
+
+* A descriptor that is marked close-on-exec and is not referenced by
+  any file action does not need to be copied at all, since it would be
+  closed at step 3 above.
+* The presence of a `posix_spawn_file_actions_addclosefrom_np()` action
+  can be used to bound the descriptor table copy at the `closefrom`
+  limit, although care must be taken to account for any
+  earlier `posix_spawn_file_actions_adddup2()` actions.
+
+These optimisations are not required for correctness and the decision
+on whether to include them in the initial implementation, or address
+them as follow-up work will be determined during implementation.
+
 === The libc/Kernel Boundary
 
 Not all of the work currently done by the libc `posix_spawn(3C)` needs
@@ -288,12 +305,8 @@ division of responsibilities is expected to be:
 ==== Before the system call (in libc, parent context)
 
 * Validation of arguments, spawn attributes, and file actions.
-* `posix_spawnp(3C)` PATH resolution. The `posix_spawnp(3C)` variant
-  searches `PATH` for the executable and this is most likely better
-  done in libc, although multiple calls into the new `spawn(2)`
-  may be necessary; details of this need to be worked through.
-* Marshalling the file actions and spawn attributes into a form
-  suitable for the system call.
+* Marshalling the file actions, spawn attributes, and the argv and envp
+  vectors into a form suitable for the system call.
 
 ==== In the kernel
 
@@ -301,6 +314,10 @@ division of responsibilities is expected to be:
 * Application of spawn attributes (signals, process group, scheduling,
   session).
 * File descriptor table construction and file action execution.
+* `posix_spawnp(3C)` PATH resolution. The PATH search has to be
+  performed against the child's current working directory, which may
+  have been changed by a CHDIR file action. Doing the search in the
+  kernel after the file actions have been applied avoids duplication.
 * Program loading and execution (`exec`).
 * Error reporting back to the parent.
 
@@ -350,7 +367,7 @@ executable in its own address space. Tools that follow process creation
 must account for this, and must also consider that the spawned program
 may have different credentials, privileges and authorisations.
 
-=== proc(7)
+=== proc(5)
 
 The `/proc` filesystem is the primary mechanism for process
 observation and control. As with the DTrace probes, existing
@@ -387,16 +404,20 @@ completed `exec`, at which point normal `/proc` semantics apply.
 === truss(1)
 
 `truss(1)` needs to learn about the new system call so that it can
-trace spawn operations and optionally follow the child process. As
-with `/proc`, the main consideration is that spawned children start
-life in a new program rather than as a copy of the parent.
+trace spawn operations. The `-f` follow-fork option will continue to
+work as expected for `spawn(2)`, following the spawned child process
+even though it begins life running a different program from the
+parent.
 
 === mdb(1)
 
-`mdb(1)` will likely need updates to its process target to correctly
-handle spawn events. There exist separate variables to control debugger
-behaviour on `fork(2)`, and on `exec(2)`; a similar control may be
-required for `spawn(2)`.
+By default, `mdb(1)` prompts the user about whether to follow the
+parent or the child when a `fork(2)` is encountered, and the same
+disposition will apply to `spawn(2)`. Whether this reuses the
+existing fork-following control or introduces a separate
+spawn-specific one will be determined during implementation.
+Either way the default behaviour will be to ask, as we do
+by default for `fork(2)`.
 
 === DTrace
 
@@ -478,12 +499,4 @@ not the underlying interface.
 . What level of consistency must the child's initial file descriptor
   set provide with respect to concurrent modifications by other threads
   in the parent? The POSIX wording needs reviewing.
-
-. Branded zones (such as the LX brand in some distributions) may have
-  their own expectations around process creation. The interaction
-  between `spawn(2)` and the brand framework needs to be considered.
-
-. There may be benefit to implementing the path search required for
-  the `posix_spawnp(3C)` variant in the kernel rather than libc.
-  Benchmarking during development will help inform here.
 

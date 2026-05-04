@@ -1,0 +1,410 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Till Wegmüller <toasterson@gmail.com>
+:sponsor:
+
+= IPD 62 Faux Ethernet (feth): A GLDv3 Virtual Network Device for Userland Frame I/O
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+illumos lacks a modern, first-class mechanism for userland programs to exchange
+Ethernet frames with the kernel networking stack. The legacy TUN/TAP driver
+bundled with some distributions is a STREAMS-based device dating to circa 2000,
+predating Crossbow, `dladm(8)`, zones, and the GLDv3 (MAC) framework. It
+integrates with none of them. Every piece of VPN software on illumos today
+depends on this driver: wireguard-go, boringtun, Tailscale, ZeroTier, OpenVPN.
+Some, like Tailscale, have given up on using it entirely and operate in a
+degraded userspace-networking mode with no kernel datapath.
+
+This IPD proposes *feth* (``faux ethernet''), a new pseudo network device that
+is a first-class citizen of the GLDv3/MAC framework while simultaneously
+exposing a character device interface through which a userland process can
+`read(2)` and `write(2)` raw Ethernet frames. The device integrates with
+`dladm(8)`, IP plumbing, zones, bridging, link aggregation, flow control, and
+the full Crossbow feature set.
+
+Bill Welliver produced a working proof-of-concept of this design in 2020,
+tested on both SmartOS and OmniOS. That work demonstrated the viability of the
+approach and surfaced a number of design questions that this IPD seeks to
+resolve and carry forward.
+
+== Background
+
+=== The Legacy TUN/TAP Driver
+
+The Universal TUN/TAP driver was written by Maxim Krasnyansky around 2000 and
+ported to Solaris by Kazuyoshi Aizawa. It provides two devices: TUN (layer 3,
+IP frames) and TAP (layer 2, Ethernet frames), generated from a single source
+file via preprocessor defines. On illumos, the device is configured by pushing
+a series of STREAMS modules. Some applications require DLPI to configure
+features such as promiscuous mode.
+
+The driver has the following shortcomings:
+
+* *No GLDv3 integration.* The device does not register with the MAC
+  framework and cannot participate in any MAC-managed feature: hardware
+  classification, Rx rings, bandwidth limits via `flowadm(8)`, or MAC-level
+  statistics.
+* *No `dladm(8)` management.* Devices cannot be created, listed, or
+  destroyed through the standard administrative interface. There is no
+  persistent configuration.
+* *No zone support.* The device has no awareness of zones and cannot be
+  properly delegated to a non-global zone.
+* *No vanity naming.* Interfaces are named `tun0`, `tap0`, etc., providing
+  no indication of purpose.
+* *Clone device semantics.* The device is destroyed when the controlling file
+  descriptor is closed, which is useful for crash recovery but prevents the
+  interface from being pre-configured or managed independently of the VPN
+  process.
+* *No bridge or aggregation participation.* Because the device is not
+  MAC-registered, it cannot be added to a `dladm` bridge or link aggregation.
+* *Poor performance.* As documented in illumos bug
+  https://www.illumos.org/issues/2623[#2623], CIFS/SMB transfers over
+  OpenVPN tunnels using TUN/TAP are orders of magnitude slower than comparable
+  operations over the same WAN using rsync or scp with OpenSSL.
+
+=== Prior Art in illumos
+
+illumos already contains several virtual network devices built on GLDv3:
+
+[cols="1,3,1,1"]
+|===
+|Device |Purpose |Char Dev |MAC Provider
+
+|*simnet*
+|Simulated Ethernet/WiFi for testing
+|No
+|Yes
+
+|*vnic*
+|Virtual NIC on top of physical/etherstub
+|No
+|Yes
+
+|*overlay*
+|VXLAN/Geneve encapsulation
+|Yes (`/dev/overlay`)
+|Yes
+
+|*iptun*
+|IP-in-IP tunneling (4in6, 6in4, 6to4)
+|No
+|Yes
+
+|*etherstub*
+|Layer 2 stub for vnic attachment
+|No
+|Yes
+|===
+
+Of these, *simnet* is architecturally closest to what feth needs to be: a
+purely software Ethernet device registered as a MAC provider, managed via DLD
+ioctls, with full `dladm` integration. The key difference is that simnet's
+data path connects two kernel-side instances peer-to-peer, while feth's data
+path bridges the kernel MAC layer to a userland file descriptor.
+
+The *overlay* driver demonstrates the other half of the design: a device that
+combines a character device (`/dev/overlay`) for userland daemon communication
+with full GLDv3 MAC registration. Its varpd daemon communicates through the
+character device to resolve overlay destinations, while the data plane operates
+entirely within the MAC framework.
+
+feth can be understood as a synthesis of these two patterns: simnet's simple
+MAC provider structure with the overlay's dual character-device-plus-MAC
+personality.
+
+=== Prior Art on Other Platforms
+
+On *Linux*, the `tun/tap` driver provides `/dev/net/tun` as a clone device;
+`ioctl()` configures the mode (TUN or TAP) and creates a named network
+interface. WireGuard was originally implemented as a kernel module that created
+its own `wg0`-style interfaces, bypassing tun/tap entirely.
+
+On *macOS*, Apple introduced undocumented `feth` (fake ethernet) devices in
+macOS 10.13. These are paired interfaces created via `ifconfig`: traffic
+injected on one member of a pair appears on the other. ZeroTier adopted this
+mechanism to eliminate their kernel extension dependency, using BPF for receive
+and `AF_NDRV` sockets for injection.
+
+On *FreeBSD* and *OpenBSD*, `tap(4)` provides a character device
+(`/dev/tapN`) paired with a standard `ifnet` network interface. FreeBSD also
+has an in-kernel WireGuard implementation (`if_wg`).
+
+== Proposal
+
+=== Overview
+
+feth is a pseudo device driver that registers each instance as a GLDv3 MAC
+provider (media type `DL_ETHER`) and simultaneously creates a character device
+node through which a userland process performs frame I/O. The driver is
+modelled on simnet and shares its administrative interface pattern: `dladm`
+subcommands backed by DLD ioctls backed by a `libdladm` helper library.
+
+=== Operational Model
+
+. *Create:* `dladm create-feth [-t] [-m <mac-address>] <link-name>`
++
+DLS allocates a datalink ID and the driver creates the MAC instance and
+character device node. If `-t` is given, the device is temporary and will
+not survive reboot. If `-m` is omitted, a locally-administered unicast MAC
+address is randomly generated.
+
+. *Plumb:* `ipadm create-addr -T static -a 10.0.0.1/24 <link-name>/v4`
++
+Standard IP plumbing. The interface behaves like any other Ethernet link for
+the purpose of IP configuration, routing, and filtering.
+
+. *Attach:* The VPN process opens the character device and begins frame I/O.
+The link transitions to UP. Frames sent by the IP stack through the MAC
+layer (`mc_tx`) are queued for `read(2)` by the process. Frames the process
+`write(2)`s are injected into the MAC layer via `mac_rx()`.
+
+. *Detach:* When the process closes the file descriptor, the link
+transitions to DOWN. Frames in either direction are dropped.
+
+. *Destroy:* `dladm delete-feth <link-name>`
+
+=== Architecture
+
+....
+ ┌─────────────────────────────────┐
+ │     userland VPN process        │
+ │   open  read  write  poll close │
+ └───────────┬─────────────────────┘
+             │ /dev/feth/<link>
+ ────────────┼──────────────────────── kernel
+             │
+ ┌───────────┴─────────────────────┐
+ │         feth driver             │
+ │                                 │
+ │  ┌───────────┐  ┌────────────┐  │
+ │  │ char dev  │  │ MAC provdr │  │
+ │  │ cb_ops    │  │ mc_tx ─────┼──┼──► enqueue for read()
+ │  │ read ─────┼──┼─► mac_rx() │  │
+ │  │ write ────┼──┼─► mac_rx() │  │
+ │  │ poll      │  │            │  │
+ │  └───────────┘  └────────────┘  │
+ │                                 │
+ │  DLD ioctl registration         │
+ │  (create, delete, info)         │
+ └───────────┬─────────────────────┘
+             │ mac_register()
+ ┌───────────┴─────────────────────┐
+ │       MAC framework             │
+ │  IP / bridging / zones / flows  │
+ └─────────────────────────────────┘
+....
+
+=== Character Device and MAC: The Dual-Personality Problem
+
+A MAC provider driver is layered on top of STREAMS via `DDI_DEFINE_STREAM_OPS`.
+The MAC framework installs its own STREAMS `qinit` routines for the network
+device nodes it manages. When feth also needs to handle `open`/`close`/`put`
+on its character device nodes, both the MAC's STREAMS entry points and feth's
+own entry points share the same `dev_ops` and `streamtab`.
+
+Welliver's prototype solved this by inspecting a magic cookie at the start of
+the queue's private data to distinguish character device streams from MAC
+streams, routing calls accordingly. This works but is fragile.
+
+A cleaner approach is to separate the two personalities at the `dev_ops` level.
+The MAC device nodes (created by the MAC framework under `/dev/net/`) are
+handled entirely by the MAC STREAMS infrastructure. The character device nodes
+(created under `/dev/feth/`) use a distinct minor number range and their own
+`cb_ops` entry points. The driver's `getinfo`, `open`, and `close` routines
+inspect the minor number to determine which personality is being accessed. This
+avoids the magic cookie and keeps the two code paths cleanly separated.
+
+The `devfsadm` plugin creates `/dev/feth/<linkname>` symlinks for the
+character device minors, while the MAC framework independently manages
+`/dev/net/<linkname>` for the network device.
+
+=== Data Path
+
+*Kernel to userland (mc_tx):*
+When the IP stack or a bridge transmits a frame on the feth interface, the MAC
+framework invokes `feth_m_tx()`. The driver pads short frames to `ETHERMIN`,
+performs any checksum or LSO emulation, strips hardware offload flags, and
+enqueues the resulting `mblk_t` on a per-device queue. If the queue exceeds
+the high-water mark and the character device consumer is not keeping up, the
+driver returns the `mblk_t` chain to MAC for back-pressure (flow control). A
+`pollwakeup()` or STREAMS `canputnext()` signals the userland process that
+data is available to `read(2)`.
+
+*Userland to kernel (write):*
+When the VPN process calls `write(2)` on the character device, the driver
+receives the data as an `mblk_t` (via the STREAMS write-side `put` procedure
+or direct `cb_ops` write). It validates the Ethernet header, applies address
+filtering (unicast match, multicast table, broadcast, promiscuous), optionally
+sets receive-side checksum flags, and calls `mac_rx()` to inject the frame
+into the MAC layer. From the perspective of every MAC client, this frame
+arrived ``from the wire''.
+
+*Flow control:*
+The prototype exposed a significant performance issue: enabling STREAMS
+`canputnext()` flow control on the character device caused throughput to drop
+by several orders of magnitude, even when water marks were tuned and
+`mac_tx_update()` was called immediately. This likely stems from the overhead
+of repeated STREAMS scheduling cycles when the character device consumer is
+fast enough to never actually need back-pressure.
+
+The proposed approach is to use a dedicated kernel queue (a simple ring buffer
+or `list_t` protected by a mutex) rather than relying on STREAMS flow control.
+The `mc_tx` callback enqueues frames and wakes the reader via `pollwakeup()`
+or `cv_signal()`. The reader dequeues frames directly. This keeps the hot path
+out of the STREAMS scheduler entirely and should be substantially faster for
+the VPN use case where the consumer almost always drains immediately.
+
+If the queue does fill (a slow or stalled consumer), the driver returns
+unprocessed ``mblk_t``s to MAC from `mc_tx`, which triggers standard MAC-level
+back-pressure. When space becomes available, the driver calls
+`mac_tx_update()` to resume transmission.
+
+=== Link State
+
+A feth interface is considered *UP* when a process has the character device
+open and *DOWN* when no process holds it. This is signalled to the MAC
+framework via `mac_link_update()`. When the link is down, `mc_tx` drops all
+frames silently: there is no point in queueing frames that nobody will read.
+
+This semantic maps naturally to VPN use: the tunnel is ``up'' precisely when the
+VPN daemon is running and has attached to the device.
+
+=== Zone Support
+
+feth devices record the zone ID at creation time. A device created in a
+non-global zone is not visible from the global zone, following the same model
+as simnet. The character device nodes must be visible in the appropriate zone
+context, which requires an `sdev` plugin so that `/dev/feth/` is properly
+populated per-zone.
+
+=== Management Interface
+
+The following `dladm(8)` subcommands are added:
+
+----
+dladm create-feth  [-t] [-R <root-dir>] [-m <mac-address>] <link>
+dladm delete-feth  [-R <root-dir>] <link>
+dladm show-feth    [-p] [-o <field>,...] [-P] [<link>]
+dladm up-feth      [<link>]
+----
+
+These mirror the existing `simnet` subcommands. The `-t` flag creates a
+temporary (non-persistent) device. `show-feth` displays link name and MAC
+address; `-P` shows persistent configuration regardless of active state.
+
+A new datalink class `DATALINK_CLASS_FETH` is added to `dls_mgmt.h`. feth
+links participate in bridging and link aggregation alongside physical devices,
+simnets, and etherstubs.
+
+A new `libdladm` helper, `libdlfeth`, provides the userland API:
+`dladm_feth_create()`, `dladm_feth_delete()`, `dladm_feth_info()`,
+`dladm_feth_up()`.
+
+=== Capabilities and Properties
+
+Like simnet, feth advertises configurable hardware offload capabilities to
+allow testing and to reduce unnecessary work in the data path:
+
+[cols="2,2,1,3"]
+|===
+|Private Property |Values |Default |Description
+
+|`_rx_ipv4_cksum`
+|on/off
+|off
+|Rx IPv4 header checksum flag
+
+|`_tx_ipv4_cksum`
+|on/off
+|off
+|Tx IPv4 header checksum
+
+|`_tx_ulp_cksum`
+|none/fullv4/partial
+|none
+|Tx TCP/UDP checksum
+
+|`_lso`
+|on/off
+|off
+|Large Segment Offload
+|===
+
+MTU is configurable up to 9000 bytes (jumbo frames), which is relevant for
+NFS-over-VPN workloads where large frames reduce per-packet overhead
+significantly.
+
+== What This Proposal Does Not Cover
+
+=== TUN Mode
+
+The legacy TUN driver operates at layer 3, exchanging raw IP packets rather
+than Ethernet frames. feth is strictly a layer 2 (Ethernet) device. A layer 3
+mode could be added in the future -- the MAC framework supports non-Ethernet
+media types -- but the overwhelming majority of modern VPN software operates at
+layer 2 (TAP mode) or implements its own IP encapsulation over a UDP socket
+and merely needs a point of injection into the kernel network stack.
+
+=== In-Kernel VPN
+
+This proposal does not implement a kernel-resident VPN protocol such as
+WireGuard. feth provides the plumbing that such an effort could build on: a
+well-integrated virtual Ethernet interface is the foundation whether the
+cryptographic engine runs in userland or in the kernel.
+
+=== API Compatibility with Legacy TUN/TAP
+
+feth is not a drop-in replacement for the legacy driver. The legacy driver
+requires pushing STREAMS modules and uses DLPI for configuration; feth uses
+`dladm` for configuration and simple `read(2)`/`write(2)` for frame I/O. VPN
+software will require adaptation, but the feth interface is substantially
+simpler than the legacy one. The frame I/O model (one frame per `read`/`write`)
+is consistent with Linux and BSD TAP semantics and should be straightforward to
+support in most VPN implementations.
+
+== Prior Work and Acknowledgments
+
+Bill Welliver (hww3) designed and implemented the original feth prototype and
+wrote the
+https://bill.welliver.org/space/smartos/gld3tap.html[GLDv3 TAP Driver replacement proposal].
+The prototype was tested on SmartOS and OmniOS and demonstrated ZeroTier
+integration. This IPD builds directly on that work, incorporating its design
+decisions where they proved sound and proposing alternatives where the
+prototype identified open problems.
+
+The simnet driver, originally developed at Sun Microsystems and enhanced at
+Joyent, provides the structural template. Ryan Zezeski's work
+https://zinascii.com/2019/resurrecting-simnet.html[resurrecting simnet] and
+adding checksum offload emulation is directly relevant.
+
+== References
+
+* https://www.whiteboard.ne.jp/~admin2/tuntap/[Legacy TUN/TAP for Solaris]
+  -- Kazuyoshi Aizawa's STREAMS-based driver
+* https://www.illumos.org/issues/2623[illumos bug #2623] -- Package and
+  provide OpenVPN and TUN/TAP drivers manageable by dladm
+* https://bill.welliver.org/space/smartos/gld3tap.html[Welliver's feth proposal]
+  -- Original GLDv3 TAP replacement design
+* https://illumos.org/man/9E/mac[mac(9E)] -- MAC framework driver entry
+  points
+* https://illumos.org/man/9E/GLDv3[GLDv3(9E)] -- Generic LAN Driver
+  framework v3
+* https://www.zerotier.com/news/how-zerotier-eliminated-kernel-extensions-on-macos/[How ZeroTier Eliminated Kernel Extensions on macOS]
+  -- macOS feth mechanism
+* https://blog.shalman.org/tailscale-for-sunos-in-2025/[Tailscale for SunOS in 2025]
+  -- Nahum Shalman on the state of Tailscale on illumos
+* https://zinascii.com/2019/resurrecting-simnet.html[Resurrecting simnet]
+  -- Ryan Zezeski on simnet enhancements
+* link:../0018/README.adoc[IPD 18] -- Overlay Network Integration/Upstream
+* link:../0028/README.md[IPD 28] -- EOF Legacy Network Driver Interfaces

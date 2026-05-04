@@ -16,7 +16,7 @@ _ALL OF THESE DETAILS ARE SUBJECT TO CHANGE AT THE MOMENT_
 and the references to draft IPDs don't imply endorsement; we have just come
 to the same conclusions for a subset of issues.
 
-- LP64 only, no-multilib
+- LP64 only, no-multilib (this requires [IPD14](../0014/README.md)'s all-64-bit-userland approach)
 - preprocessor token is `__aarch64__` (the GCC default)
 - unsigned characters, as is usual on ARM
 - `unix` per-platform, because we lack coherent boot services for early
@@ -257,6 +257,7 @@ that have not been widely discussed.
 * [Hayashi Naoyuki's Original Port](https://github.com/n-hys/illumos-gate/wiki)
 * [ARM Developer Documentation](https://developer.arm.com/documentation/#sort=relevancy&f:@navigationhierarchiesproducts=[Architectures,CPU%20Architecture,A-Profile,Armv8-A])
 * [Multiboot2 Specification](https://www.gnu.org/software/grub/manual/multiboot2/multiboot.html)
+* [IPD 14 illumos and Y2038](../0014/README.md)
 * [IPD 34 Rationalize Kernel Architecture Module Paths](../0034/README.md)
 * [IPD 36 Rationalize $(MACH64) Command Paths](../0036/README.md)
 * [ELF Handling For Thread-Local Storage](https://www.akkadia.org/drepper/tls.pdf)

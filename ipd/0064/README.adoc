@@ -292,10 +292,10 @@ behaviour is considered acceptable since:
   happened a moment before or after the `spawn(2)` call. For example,
   while thread A is in `spawn(2)`, thread B might call `close(3);
   close(100);`. The child may end up with fd 3 open and fd 100 closed
-  -- a state that no atomic snapshot would have produced, but one that
-  could equally have arisen if thread B had completed its first
-  `close(3)` before the `spawn(2)` was entered and its `close(100)`
-  immediately after.
+  -- a state that no atomic snapshot would have produced. However,
+  this is still ok. An application that needs the child's descriptor
+  table to reflect a particular set of descriptors must arrange that
+  itself as described below.
 
 Applications that need stronger guarantees should mark the descriptors
 in question as close-on-fork or close-on-exec, or use

@@ -240,30 +240,12 @@ descriptors directly. This works because the parent is suspended
 throughout.
 
 With a native `spawn(2)`, we need to construct the child's file
-descriptor table without suspending the parent. There are a couple
-of different ways to handle this:
-
-. Take a snapshot of the parent's file descriptor table under a lock,
-  then apply the file actions to the snapshot. This provides a
-  consistent point-in-time view of the parent's descriptors. The lock
-  need only be held for the duration of the snapshot, not for the entire
-  spawn operation.
-
-. Rather than copying the entire table, build the child's file
-  descriptor table by examining only the descriptors that are needed
-  (those referenced by file actions and those not marked close-on-fork).
-  This could be more efficient for processes with very large
-  descriptor tables.
-
-A third possibility of implementing some kind of copy-on-write scheme
-for the file descriptor table is not considered viable as it would
-require changes to file descriptor handling throughout the kernel and
-the complexity would far outweigh any benefit for this use case.
-
-The choice between these approaches has implications for the consistency
-guarantees we provide. What happens if another thread opens or closes
-a file descriptor concurrently with the `spawn(2)` call is not fully
-specified by POSIX.
+descriptor table without suspending the parent. The chosen approach is
+to take a snapshot of the parent's file descriptor table and apply the
+file actions to that snapshot. A copy-on-write scheme is not considered
+viable since it would require changes to file descriptor handling
+throughout the kernel and the complexity would far outweigh any benefit
+for this use case.
 
 Since `spawn(2)` is logically equivalent to a fork followed by an
 exec, both close-on-fork and close-on-exec need to be honoured, but
@@ -279,6 +261,49 @@ We must therefore:
 . Apply the file actions in order;
 . Close any remaining descriptors that are flagged for close-on-exec.
 
+==== Locking and atomicity
+
+The plan is to hold the per-process `fi_lock` for the duration of the
+snapshot, and to acquire each entry's `uf_lock` as we examine it. The
+flags of each descriptor need to be inspected to honour close-on-fork,
+so taking `uf_lock` per-fd is necessary anyway. This approach does not
+provide a strictly atomic snapshot of the parent's descriptor table -
+between releasing one descriptor's `uf_lock` and acquiring the next,
+another thread can complete a modification to the descriptor we have
+already processed (or, in the case of operations that do not take
+`fi_lock`, to one we have not yet reached). The snapshot we produce is
+therefore a sequence of per-fd observations rather than that of the
+table at a single instant.
+
+Achieving strict atomicity would require something analogous to
+`flist_grow()` which acquires `fi_lock` and every `uf_lock` at once
+before doing any work. That scales poorly and blocks every other
+thread from touching the descriptor table for the duration, which
+defeats a lot of the stated advantages of this IPD.
+
+In terms of application-visible consistency, the torn-snapshot
+behaviour is considered acceptable since:
+
+* If the application has properly synchronised access to the
+  descriptors that `spawn(2)` will care about, there is no race in the
+  first place.
+* If it has not, the externally observable result of any interleaving
+  is indistinguishable from one where the concurrent operation had
+  happened a moment before or after the `spawn(2)` call. For example,
+  while thread A is in `spawn(2)`, thread B might call `close(3);
+  close(100);`. The child may end up with fd 3 open and fd 100 closed
+  -- a state that no atomic snapshot would have produced, but one that
+  could equally have arisen if thread B had completed its first
+  `close(3)` before the `spawn(2)` was entered and its `close(100)`
+  immediately after.
+
+Applications that need stronger guarantees should mark the descriptors
+in question as close-on-fork or close-on-exec, or use
+`posix_spawn_file_actions_addclosefrom_np(3C)` to set a descriptor
+ceiling that the spawned child should not inherit.
+
+==== Optimisations
+
 The descriptor table copy is potentially the most expensive part of
 `spawn(2)`, particularly for processes with a large number of open
 descriptors. There is scope for optimisation here by pre-scanning
@@ -287,13 +312,13 @@ the file actions, for example:
 * A descriptor that is marked close-on-exec and is not referenced by
   any file action does not need to be copied at all, since it would be
   closed at step 3 above.
-* The presence of a `posix_spawn_file_actions_addclosefrom_np()` action
+* The presence of a `posix_spawn_file_actions_addclosefrom_np(3C)` action
   can be used to bound the descriptor table copy at the `closefrom`
   limit, although care must be taken to account for any
-  earlier `posix_spawn_file_actions_adddup2()` actions.
+  earlier `posix_spawn_file_actions_adddup2(3C)` actions.
 
 These optimisations are not required for correctness and the decision
-on whether to include them in the initial implementation, or address
+on whether to include them in the initial implementation or address
 them as follow-up work will be determined during implementation.
 
 === The libc/Kernel Boundary
@@ -493,10 +518,4 @@ simultaneously.
 `spawn(2)` will be a private interface. A brief `spawn(2)` man page
 may be written describing the system call in high level terms, but
 not the underlying interface.
-
-== Open Questions
-
-. What level of consistency must the child's initial file descriptor
-  set provide with respect to concurrent modifications by other threads
-  in the parent? The POSIX wording needs reviewing.
 

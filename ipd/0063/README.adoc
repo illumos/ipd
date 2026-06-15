@@ -1,0 +1,180 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Bill Sommerfeld <sommerfeld@hamachi.org>
+:sponsor: TBD
+
+= IPD 63 Fixing LC_GLOBAL_LOCALE
+{authors}
+
+[cols="3"]
+|===
+|Authors: {author}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Background
+
+POSIX 2008 added opaque locale objects of type `locale_t`, and several
+functions to manipulate them (including `newlocale()`, `duplocale()`,
+`uselocale()`, and `freelocale()`).
+
+The POSIX 2008 API for thread-specific locales defines
+`LC_GLOBAL_LOCALE` as a "special locale object descriptor" of type
+`locale_t`, distinct from `(locale_t)0`.
+
+Only a few functions are documented as accepting it as a `locale_t`
+parameter: `uselocale()`, `duplocale()`, and `getlocalename_l()`.
+Only `uselocale()` is documented as returning it, when a thread has no
+per-thread locale set.
+
+There is no way in the POSIX API to get a `locale_t` corresponding to
+the current global locale; you can only create a copy with `duplocale()`
+or a modified copy with `newlocale()`; this appears to be an intentional
+feature of the API.
+
+FreeBSD, MacOS, Linux, and Solaris 11 all define `LC_GLOBAL_LOCALE` as
+`((locale_t)-1)` or equivalent.
+
+Illumos's support for this API was added in
+
+https://illumos.org/issues/2964[`2964`] `need POSIX 2008 locale object support`
+
+Illumos defines `LC_GLOBAL_LOCALE` as `(__global_locale())`; the
+`__global_locale()` function returns the `locale_t` for the current
+global locale.
+
+== Problem Statement
+
+The current definition of `LC_GLOBAL_LOCALE` in illumos differs
+significantly from common practice on other systems (including
+Solaris) and is not consistent with a strict reading of the spec.
+
+If the value of `LC_GLOBAL_LOCALE` can vary over time it is impossible
+for threads to unambiguously determine if they have a thread-local
+locale set.  See link:locale_anomaly_1.c[example 1]; this program
+reports a "FAIL" on illumos and a "PASS" on other systems.  This also
+creates the opportunity for races in multithreaded programs.
+
+If a `locale_t` for the global locale can leak out of libc into
+user code, `uselocale(x)` becomes ambiguous: did the application
+intend to set a per-thread locale, or to clear the per-thread locale
+and revert to using the global locale.
+
+Additionally, if `LC_GLOBAL_LOCALE` is not a compile-time constant,
+code that compiles on other platforms will fail to compile on
+illumos; see link:locale_anomaly_2.c[example 2].
+
+Changing our implementation to either alternative 1 or alternative 2
+will eliminate the races.
+
+Alternative 1 is simpler and matches what other operating systems have
+been doing all along but creates the risk of breaking existing
+programs which accidentally depend on Illumos behavior.  It is my
+belief that very little, if any, such code exists outside of
+illumos-gate.
+
+Alternative 2 preserves the Illumos's apparently-unique "uselocale()
+returns a real locale_t" behavior but may risk additional
+complications (since all facets of the global locale can't be changed
+atomically).
+
+== Current implementation in Illumos
+
+* `__global_locale()` returns a pointer to the
+  current global locale, which may change after any call to
+  `setlocale()`
+
+* `uselocale()` compares its argument to the current global locale; a
+  caller passing `LC_GLOBAL_LOCALE` to clear the thread-specific
+  locale may race with another thread calling `setlocale()` and end up
+  with a per-thread locale pointing at an old global locale.
+
+* Callers of `uselocale()` comparing its return value to
+  `LC_GLOBAL_LOCALE` may race with calls to `setlocale()`.
+
+== Prerequisites for a fix
+
+Any fix will first require integration of:
+
+https://illumos.org/issues/15725[`15725`] `Replace uselocale(NULL) with __curlocale() in libc`
+
+since libc currently uses `uselocale(NULL)` to fetch the effective
+locale (whether thread-local or global)
+
+== Alternative 1 (preferred): Have `LC_GLOBAL_LOCALE` yield ((locale_t)-1)
+
+* Define `LC_GLOBAL_LOCALE` as `((locale_t)-1)`
+
+* Change `__global_locale()` to return `((locale_t)-1)`
+
+Pros:
+
+* Closely matches what a large number of other operating systems do.
+
+* Makes `LC_GLOBAL_LOCALE` into a compile-time constant.
+
+* Closes the races.
+
+Cons:
+
+* May break non-standard code dependent on current illumos behavior
+that expects `LC_GLOBAL_LOCALE` and the return value of
+`uselocale(NULL)` to be a full `locale_t` which is usable with all of
+the `*_l()` APIs.
+
+== Alternative 2: Return a constant locale_t pointer
+
+* Change `__global_locale()` to return a constant pointer to a mutable
+  specially marked `struct _locale`.
+
+* Change `setlocale()` to update the mutable struct with pointers to
+  the currently active locale's facets.
+
+* Change `uselocale()` to interpret any locale with `loc->on_list != 0`
+  as equivalent to the global locale.
+
+Pros:
+
+* Permits code dependent on our current behavior (if any such exists
+outside illumos-gate) to continue to work.
+
+Cons:
+
+* Substantially more complex.
+
+* Creates potential races for any code which uses `LC_GLOBAL_LOCALE`
+as a real `locale_t` -- as it is be possible to atomically swap out
+all of the facet pointers simultaneously when the global locale changes.
+
+== Bold Assertion
+
+I have not found code outside of illumos-gate which depends on
+`uselocale` always returning a non-placeholder `locale_t`, or which
+depends on `LC_GLOBAL_LOCALE` being a real, non-placeholder
+`locale_t`.
+
+== Survey of usage of `LC_GLOBAL_LOCALE` and `uselocale`
+
+Openindiana publishes over 10,000 packages.
+
+I surveyed all ELF binaries packaged by openindiana (checking only the
+latest version of each published package).
+
+Of those binaries:
+
+ * 121 binaries across 49 packages referenced `uselocale()`
+
+ * 120 binaries across 56 packages referenced `__global_locale()`.
+
+ * 152 binaries across 64 packages referenced one or the other or both.
+
+I will look at the source for all 64 of these packages and look at
+their usage of uselocale() and LC_GLOBAL_LOCALE and update this draft
+accordingly.
+
+

@@ -43,6 +43,14 @@ Given that recompilation is required anyway, and we only support 64-bit
 hardware, it seems much easier to rebuild as 64-bit and be done with it.
 Such an approach would also address any other 32-bit limitations.
 
+Recent releases of Oracle Solaris introduced the concept of `utime32_t`,
+where, "unsigned values can be used to represent times from 1970-2106
+instead of the traditional signed 32-bit range of 1901-2038." This may
+serve as a guardrail to prevent standard-coded or other hardcoded 32-bit
+time-in-seconds fields. (Source:
+[Alan Coopersmith](https://hachyderm.io/@alanc/116105750050187954) from
+Fediverse site hachyderm.io.)
+
 ## Other areas impacted
 
 It's possible that there may be areas beyond userland applications that
@@ -58,6 +66,9 @@ are impacted. Such as:
   `localtime.c` talks about this)
 * illumos BPF has `struct bpf_timeval` which is an "on the wire" 32-bit
   `struct timeval`-alike.
+
+The utime32_t may be able to mitigate impacts in these areas, at least until
+the year 2106.
 
 ## Implementation
 

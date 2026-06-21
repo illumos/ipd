@@ -44,9 +44,9 @@ Illumos's support for this API was added in
 
 https://illumos.org/issues/2964[`2964`] `need POSIX 2008 locale object support`
 
-Illumos defines `LC_GLOBAL_LOCALE` as `(__global_locale())`; the
-`__global_locale()` function returns the `locale_t` for the current
-global locale.
+Illumos defines `LC_GLOBAL_LOCALE` as +++<code>(__global_locale())</code>+++;
+the +++<code>__global_locale()</code>+++ function returns the `locale_t`
+for the current global locale.
 
 == Problem Statement
 
@@ -85,7 +85,7 @@ atomically).
 
 == Current implementation in Illumos
 
-* `__global_locale()` returns a pointer to the
+* +++<code>__global_locale()</code>+++ returns a pointer to the
   current global locale, which may change after any call to
   `setlocale()`
 
@@ -101,7 +101,7 @@ atomically).
 
 Any fix will first require integration of:
 
-https://illumos.org/issues/15725[`15725`] `Replace uselocale(NULL) with __curlocale() in libc`
+https://illumos.org/issues/15725[`15725`] +++<code>Replace uselocale(NULL) with __curlocale() in libc</code>+++
 
 since libc currently uses `uselocale(NULL)` to fetch the effective
 locale (whether thread-local or global)
@@ -110,7 +110,7 @@ locale (whether thread-local or global)
 
 * Define `LC_GLOBAL_LOCALE` as `((locale_t)-1)`
 
-* Change `__global_locale()` to return `((locale_t)-1)`
+* Change +++<code>__global_locale()</code>+++ to return `((locale_t)-1)`
 
 Pros:
 
@@ -129,7 +129,7 @@ the `*_l()` APIs.
 
 == Alternative 2: Return a constant locale_t pointer
 
-* Change `__global_locale()` to return a constant pointer to a mutable
+* Change +++<code>__global_locale()</code>+++ to return a constant pointer to a mutable
   specially marked `struct _locale`.
 
 * Change `setlocale()` to update the mutable struct with pointers to
@@ -169,12 +169,11 @@ Of those binaries:
 
  * 121 binaries across 49 packages referenced `uselocale()`
 
- * 120 binaries across 56 packages referenced `__global_locale()`.
+ * 120 binaries across 56 packages referenced +++<code>__global_locale()</code>+++.
 
  * 152 binaries across 64 packages referenced one or the other or both.
 
 I will look at the source for all 64 of these packages and look at
 their usage of uselocale() and LC_GLOBAL_LOCALE and update this draft
 accordingly.
-
 

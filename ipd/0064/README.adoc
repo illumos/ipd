@@ -2,10 +2,10 @@
 :toc: left
 :numbered:
 :icons: font
-:state: draft
+:state: published
 :revremark: State: {state}
 :authors: Andy Fiddaman <illumos@fiddaman.net>
-:sponsor:
+:sponsor: Robert Mustacchi <rm@fingolfin.org>
 :source-highlighter: pygments
 :stem: latexmath
 ifdef::env-github[]
@@ -188,46 +188,46 @@ new process running a new program:
 * Watchpoint manipulation can be avoided entirely. `vfork(2)` must
   clear watchpoints on the shared address space and restore them later.
 * There are no shared memory segments to duplicate or share.
-* No need to clone threads/LWPs; the kernel creates a single new LWP
-  for the child directly.
+* No need to clone threads/LWPs; the kernel will create a single new
+  LWP for the child directly.
 * The parent's full file descriptor table need not be copied wholesale.
   See <<sec-fd>> for more discussion.
 
-The combined effect of skipping these steps leads to a faster and
+The combined effect of skipping these steps will lead to a faster and
 more scalable process creation path. Multiple threads in the same
-process can call `spawn(2)` concurrently; the only serialisation is on
-the locks that must be held briefly during process creation (the PID
-and file descriptor table, for example).
+process will be able to call `spawn(2)` concurrently; the only
+serialisation will be on the locks that must be held briefly during
+process creation (the PID and file descriptor table, for example).
 
 === High-Level Operation
 
 At a high level, the `spawn(2)` system call will proceed as follows:
 
-. The kernel copies the argument vector, environment vector, file
+. The kernel will copy the argument vector, environment vector, file
   actions, and spawn attributes from the caller's address space into
   kernel memory. This must happen early because the parent's address
   space will not be available to the child.
-. A new process structure is created and initialised from the parent,
-  inheriting credentials, resource controls, the contract template, and
-  other process-level properties.
-. The spawn attributes are applied: signal mask, signal dispositions,
-  process group, scheduling parameters, session, etc.
-. File descriptors are set up for the child, either by copying the
+. A new process structure will be created and initialised from the
+  parent, inheriting credentials, resource controls, the contract
+  template, and other process-level properties.
+. The spawn attributes will be applied: signal mask, signal
+  dispositions, process group, scheduling parameters, session, etc.
+. File descriptors will be set up for the child, either by copying the
   parent's table and then applying file actions, or by constructing
   the child's table directly. See <<sec-fd>>.
-. The specified program is loaded and executed in the new process's
-  address space, as with `exec`.
-. If the exec succeeds, the system call returns in the parent with the
-  child's PID. If the exec fails, the child is torn down and the error
-  is returned to the parent.
+. The specified program will be loaded and executed in the new
+  process's address space, as with `exec`.
+. If the exec succeeds, the system call will return in the parent with
+  the child's PID. If the exec fails, the child will be torn down and
+  the error returned to the parent.
 
-The parent does not need to wait for the child to exec before it can
-resume. However, the system call itself is synchronous; it does not
-return until the child has either successfully begun executing the new
-program or failed. This preserves the existing `posix_spawn(3C)` error
-reporting semantics where exec failures can be communicated to the
-caller as an error return, except when `POSIX_SPAWN_NOEXECERR_NP` is
-set.
+The parent will not need to wait for the child to exec before it can
+resume. However, the system call itself will be synchronous; it will
+not return until the child has either successfully begun executing the
+new program or failed. This will preserve the existing `posix_spawn(3C)`
+error reporting semantics where exec failures can be communicated to
+the caller as an error return, except when `POSIX_SPAWN_NOEXECERR_NP`
+is set.
 
 [[sec-fd]]
 === File Descriptor Handling
@@ -239,7 +239,7 @@ dup2, etc.) are executed in the child, which can  access the parent's
 descriptors directly. This works because the parent is suspended
 throughout.
 
-With a native `spawn(2)`, we need to construct the child's file
+With a native `spawn(2)`, we will need to construct the child's file
 descriptor table without suspending the parent. The chosen approach is
 to take a snapshot of the parent's file descriptor table and apply the
 file actions to that snapshot. A copy-on-write scheme is not considered
@@ -263,17 +263,19 @@ We must therefore:
 
 ==== Locking and atomicity
 
-The plan is to hold the per-process `fi_lock` for the duration of the
-snapshot, and to acquire each entry's `uf_lock` as we examine it. The
-flags of each descriptor need to be inspected to honour close-on-fork,
-so taking `uf_lock` per-fd is necessary anyway. This approach does not
-provide a strictly atomic snapshot of the parent's descriptor table -
-between releasing one descriptor's `uf_lock` and acquiring the next,
+Each entry will be examined and copied while holding that entry's
+`uf_lock`; the flags of each descriptor need to be inspected to honour
+close-on-fork, so taking `uf_lock` per-fd is necessary anyway. The
+per-process `fi_lock` will be taken only briefly, to size the child's
+table. Holding `fi_lock` across the whole snapshot would not change the
+application-visible consistency and would serialise the copy against
+every other thread touching the descriptor table. This approach will
+not provide a strictly atomic snapshot of the parent's descriptor table
+- between releasing one descriptor's `uf_lock` and acquiring the next,
 another thread can complete a modification to the descriptor we have
-already processed (or, in the case of operations that do not take
-`fi_lock`, to one we have not yet reached). The snapshot we produce is
-therefore a sequence of per-fd observations rather than that of the
-table at a single instant.
+already processed (or to one we have not yet reached). The snapshot we
+produce will therefore be a sequence of per-fd observations rather than
+that of the table at a single instant.
 
 Achieving strict atomicity would require something analogous to
 `flist_grow()` which acquires `fi_lock` and every `uf_lock` at once
@@ -317,9 +319,11 @@ the file actions, for example:
   limit, although care must be taken to account for any
   earlier `posix_spawn_file_actions_adddup2(3C)` actions.
 
-These optimisations are not required for correctness and the decision
-on whether to include them in the initial implementation or address
-them as follow-up work will be determined during implementation.
+These optimisations are not required for correctness but both will be
+included in the implementation. The child's table will also be sized to
+cover only the descriptors actually being copied, so a sparse,
+high-numbered descriptor in the parent (a common pattern for daemons)
+will not cause every spawned child to build an enormous table.
 
 === The libc/Kernel Boundary
 
@@ -337,7 +341,16 @@ division of responsibilities is expected to be:
 
 * Process creation.
 * Application of spawn attributes (signals, process group, scheduling,
-  session).
+  session). For the scheduling attributes
+  (`POSIX_SPAWN_SETSCHEDULER` and `POSIX_SPAWN_SETSCHEDPARAM`), libc
+  will resolve the POSIX scheduling policy and priority in the parent -
+  using the same machinery that backs `sched_setscheduler(3C)` - into
+  either explicit scheduling class parameters or a class-independent
+  priority change, and marshal the result. The child will apply it to
+  itself via `parmsset()` or `setthreadprio()`, after any RESETIDS and
+  session/process group changes, so that the privilege checks are
+  performed against the child's final credentials, matching the
+  historical order.
 * File descriptor table construction and file action execution.
 * `posix_spawnp(3C)` PATH resolution. The PATH search has to be
   performed against the child's current working directory, which may
@@ -360,6 +373,13 @@ both operations it must require both privileges. A process that has
 been denied either one must not be able to use `spawn(2)` to bypass
 that restriction.
 
+In the implementation, `PRIV_PROC_FORK` will be checked in the parent
+during process creation, and `PRIV_PROC_EXEC` will be checked in the
+child by the standard exec path. An exec denied for want of privilege
+will be reported back to the parent as the error return from
+`spawn(2)`, and the partially-constructed child will exit without a
+trace.
+
 === System Call Number
 
 Solaris implemented a `spawn` system call at syscall number 2. This
@@ -379,13 +399,15 @@ semantics.
 
 Regardless, illumos has already repurposed syscall 2 for
 `SYS_psecflags` (process security flags), so the Solaris number could
-not be re-used without displacing an existing system call. A new
-system call number will be allocated during implementation.
+not be re-used without displacing an existing system call. Syscall
+number 143 has been allocated. Fittingly, this is the slot that
+historically held `fork1` before the fork variants were consolidated
+into `forksys`.
 
 == Debugger and Tool Support
 
-The introduction of a new process creation mechanism requires updates to
-several debugging and observability tools. Unlike `fork(2)`, where the
+The introduction of a new process creation mechanism will require
+updates to several debugging and observability tools. Unlike `fork(2)`, where the
 child initially shares the parent's program text, a successful
 `spawn(2)` produces a child that is already running a different
 executable in its own address space. Tools that follow process creation
@@ -400,35 +422,37 @@ observation and control. As with the DTrace probes, existing
 should match what consumers see today for an equivalent
 `fork(2)` + `exec(2)` pair.
 
-In the parent, `spawn(2)` is an ordinary system call and is subject to
-the existing `PR_SYSENTRY` / `PR_SYSEXIT` stop mechanisms.
+In the parent, `spawn(2)` will be an ordinary system call and will be
+subject to the existing `PR_SYSENTRY` / `PR_SYSEXIT` stop mechanisms.
 
-In the child, the behaviour is the same as if `exec` had been called:
+In the child, the behaviour will be the same as if `exec` had been
+called:
 
-* All tracing flags are reset, with the exception of `PR_RLC`
+* All tracing flags will be reset, with the exception of `PR_RLC`
   (run-on-last-close), matching the existing `exec` semantics.
-* Watchpoints and breakpoints are cleared, since the child has a new
-  address space.
-* `/proc/<pid>/psinfo`, `/proc/<pid>/status`, and the auxv reflect the
-  new program from the moment the child becomes observable.
+* Watchpoints and breakpoints will be cleared, since the child has a
+  new address space.
+* `/proc/<pid>/psinfo`, `/proc/<pid>/status`, and the auxv will reflect
+  the new program from the moment the child becomes observable.
 
 A debugger that has `PR_FORK` set on the parent will be able to attach
 to the child in the usual way; however, unlike `fork(2)`, the child
-becomes observable only after the new program image has been loaded.
-There is no intermediate state in which the child exists with the
-parent's address space or executable.
+will become observable only after the new program image has been
+loaded. There will be no intermediate state in which the child exists
+with the parent's address space or executable.
 
-To enforce this, a new process flag (provisionally `SSPAWNING`) will
-be set on the child while the spawn is in progress, alongside the
-existing flags such as `SFORKING` and `SEXECED`. While `SSPAWNING`
-is set, libproc-style control operations on the child must fail or
-block since the process is only partially constructed. The flag will
-be cleared once the child reaches the same state it would have after a
-completed `exec`, at which point normal `/proc` semantics apply.
+To enforce this, a new process flag, `SSPAWNING`, will be set on the
+child while the spawn is in progress, alongside the existing flags such
+as `SFORKING` and `SEXECED`. While `SSPAWNING` is set, `/proc` control
+operations on the child will fail with `EBUSY`, exactly as they do for
+a system process, since the process is only partially constructed.
+The flag will be cleared at the point in exec where the process is
+marked as having exec'd (`SEXECED`), after which normal `/proc`
+semantics apply.
 
 === truss(1)
 
-`truss(1)` needs to learn about the new system call so that it can
+`truss(1)` will need to learn about the new system call so that it can
 trace spawn operations. The `-f` follow-fork option will continue to
 work as expected for `spawn(2)`, following the spawned child process
 even though it begins life running a different program from the
@@ -438,11 +462,23 @@ parent.
 
 By default, `mdb(1)` prompts the user about whether to follow the
 parent or the child when a `fork(2)` is encountered, and the same
-disposition will apply to `spawn(2)`. Whether this reuses the
-existing fork-following control or introduces a separate
-spawn-specific one will be determined during implementation.
-Either way the default behaviour will be to ask, as we do
-by default for `fork(2)`.
+disposition will apply to `spawn(2)`. This will reuse the existing
+fork-following control (`::set forkmode`); the default behaviour will
+be to ask, as for `fork(2)`.
+
+Unlike a forked child, the child of a spawn is already running a
+different program to the parent. When following the child, the
+debugger will therefore discard the parent's symbol state and load
+that of the new executable, just as it would had the debuggee itself
+exec'd.
+
+For kernel debugging, a `::spawn` dcmd in the `genunix` module will
+list processes which are currently within `spawn(2)`, showing the child
+process, its parent, the address of the in-kernel parameter block and
+the path being executed. A child will refer to the parameter block only
+until it reports back to its parent, so the listing will be a snapshot
+of in-flight operations, useful when inspecting a stuck spawn from a
+crash dump or with `kmdb`.
 
 === DTrace
 
@@ -456,28 +492,62 @@ exec, so it will fire the same probes as that sequence would:
 * `proc:::exec` when the new program image is about to be loaded.
 * `proc:::exec-success` or `proc:::exec-failure` according to the
   outcome.
+* `proc:::start` when the child begins execution in the new program.
 
-No new probes are proposed. In particular, no probe that duplicates
-the semantics of `exec-success` will be added.
+No new `proc` provider probes are proposed. In particular, no probe
+that duplicates the semantics of `exec-success` will be added.
+
+The kernel will, however, gain a statically defined tracing (`sdt`)
+probe for assisting with the diagnosis of failed spawns. A child
+whose attribute application, file actions or exec fails will evaporate
+without ever having been visible to its parent, so the failure will
+otherwise be observable only as the error returned by `posix_spawn(3C)`.
+The probe will fire in the context of the failing child:
+
+    sdt:::spawn-error
+        arg0: the kspawn_param_t describing the spawn.
+        arg1: the stage which failed ("attributes", "file-actions", "exec")
+        arg2: the error number
+
+The parameter block will be passed because the probe context is
+otherwise unhelpful for identifying the failed target. The child will
+die without ever having exec'd, so execname and curpsinfo will still
+describe the parent's image.
+
+As with other `sdt` probes, this is an implementation detail rather
+than a committed interface.
+
+One observable difference from the `vfork(2)` implementation will
+arise when the exec fails. A vfork child returns to userland (briefly,
+in the borrowed image) before attempting the exec, and so fires
+`proc:::start`. A spawned child that fails to exec will never run in
+userland at all and will fire only `proc:::create` and, when it is
+torn down, `proc:::exit`.
 
 === Auditing
 
 The BSM audit subsystem records events for both `fork(2)` (events
 `AUE_FORK1`, `AUE_FORKALL`, `AUE_VFORK`) and `exec(2)` (`AUE_EXECVE`).
-The new `spawn(2)` system call will need a new audit event
-(`AUE_SPAWN`?) so that audit trails correctly reflect process creation.
-As a minimum, the following will need to be updated:
-
-* Addition of the new audit event;
-* An update to the kernel auditing code to record details of the spawn
-  operation such as the path, arguments and errors/child PID;
-* Updates to `auditreduce(8)` and `praudit(8)` so that the new
-  event can be filtered, parsed, and printed;
-* Updates to the syslog audit plugin and the BSM XML definitions.
-
 Since `spawn(2)` combines what are currently two separately audited
-operations (fork and exec), we must ensure that the new single audit
-record captures sufficient information for both purposes.
+operations, a single record must capture sufficient information for
+both purposes.
+
+A new audit event, `AUE_SPAWN` (319), will be added, assigned to the
+`ps` and `ex` classes to mirror its fork and exec halves. The record
+will contain:
+
+* A text token carrying the path of the program that was (or, on
+  failure, would have been) executed. For `posix_spawnp(3C)` this is
+  the fully resolved path, reported back to the parent by the child
+  after the search completes;
+* The argument and environment vectors, subject to the same `argv`
+  and `arge` audit policies as for exec;
+* The standard return token, carrying the child's PID on success or
+  the error on failure.
+
+No changes will be needed to `auditreduce(8)`, `praudit(8)` or the
+syslog plugin, all of which handle records token-generically, nor to
+the XML definitions, which cover only userland-generated events.
 
 == Consumers
 
@@ -494,13 +564,31 @@ A practical advantage of this work is that many programs already use
   start services.
 
 Because the `spawn(2)` system call will be used transparently through
-the existing `posix_spawn(3C)` API, no changes to these consumers are
-required.
+the existing `posix_spawn(3C)` API, no changes to these consumers will
+be required.
 
 However, as a followup to this work, other system components,
 particularly any that routinely spawn a lot of sub-processes
 (for example `dmake(1)`), should be considered for migration
 to use `posix_spawn(3C)`.
+
+== Performance
+
+With the new implementation in place, the same spawnado benchmark on
+the same system (and now on non-DEBUG bits in both cases) shows
+throughput rising with thread count instead of collapsing. It reaches
+around 14,700 spawns/sec at 41 threads and holds between 14,000 and
+14,600 through fifty - three times the previous peak rate and fourteen
+times the previous fifty-thread rate. The median per-spawn latency at
+fifty threads falls from 11.2ms to 769us.
+
+.Spawn throughput vs thread count, before and after
+image::comparison.png[Spawn throughput comparison]
+
+For workloads whose spawning processes are small and single-threaded,
+`spawn(2)` performs equivalently to the `vfork(2)` path. A full
+(non-DEBUG) build of illumos-gate, around 400,000 process creations,
+takes the same time with either implementation underneath.
 
 == Testing
 
@@ -509,13 +597,26 @@ against the `posix_spawn(3C)` API rather than the implementation. The
 same tests must continue to pass when the underlying implementation
 switches from `vfork(2)` + `execve(2)` to the native `spawn(2)`.
 
+A new os-tests suite will exercise the raw system call interface
+directly: it will verify that deliberately corrupt marshalled
+structures are rejected with `EINVAL` rather than misbehaving, and that
+a child killed in the window between creation and exec is cleanly
+waitable and never leaves the parent stuck.
+
 Additional tests will be added to exercise concurrency scenarios that
 are expected to improve, such as multiple threads spawning children
 simultaneously.
 
+Some behaviour will require manual verification: `truss -f` following a
+spawned child into its new program; `mdb` fork-following with each
+`forkmode` setting, including a spawn across a privilege boundary
+(a set-id program), where the debugger must lose the child
+gracefully; audit records with the `argv` and `arge` policies
+enabled; and `/proc` consumers (`ps`, `pfiles`, `pstop` and friends)
+run against a process spawning in a tight loop.
+
 == Documentation
 
-`spawn(2)` will be a private interface. A brief `spawn(2)` man page
-may be written describing the system call in high level terms, but
-not the underlying interface.
+`spawn(2)` will be a private interface, used only by libc, and
+intentionally undocumented; no man page will be written.
 

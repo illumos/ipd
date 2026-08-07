@@ -1,5 +1,5 @@
 ---
-authors: Robert Mustacchi <rm@fingolfin.org>
+authors: Robert Mustacchi <rm@fingolfin.org>, Andy Fiddaman <illumos@fiddaman.net>
 state: draft
 ---
 
@@ -72,9 +72,18 @@ this way. Each `directory` entry will have the following fields:
 | path | yes | N/A | The directory path to create (subject to SMF method token expansion) |
 | user | no | `method_credential.user` | user to own the directory |
 | group | no | `method_credential.group` | group to own the directory |
-| mode | no | 0770 | Permissions for the directory |
+| mode | no | 0770 | Permissions for the directory, as an octal string |
 | env | no | "" | Environment variable to export `path` in |
 | empty | no | false | Ensure the target directory is empty on start up |
+
+The `mode` is an octal string, and allows the set-uid, set-gid, and
+sticky bits to be specified along with the desired mode. The `env` value
+must not contain `=` and must not use the reserved `SMF_` prefix. Both
+are validated when the manifest is imported. When the method context uses
+an RBAC profile rather than a credential, the user and group resolved
+from the profile are used for the uid and gid by default, and when no
+method context exists the init defaults of `root`/`root` apply, matching
+the start method.
 
 Semantically, this operation will only occur when a service transitions
 to being **online**. Generally, that means before a `start` method is
@@ -83,13 +92,18 @@ services and restarters such as a periodic one (like exists in Solaris
 for cron-like activity), then that restarter would also theoretically be
 able to honor this and make sure that they existed.
 
+The entries are read from the instance's running snapshot, so changes
+take effect on the next start after a `refresh`, in the same way as
+other method configuration.
+
 Here's an example of what it might look like:
 
 ```
 <managed_paths>
-	<directory path="/var/run/foobar" empty=true />
-	<directory path="/var/db/mydb-%i" env="DB_PATH" />
-        <directory path="/var/tmp/unreadable" mode=0000 user="noaccess" group="noaccess" />
+	<directory path='/var/run/foobar' empty='true' />
+	<directory path='/var/db/mydb-%i' env='DB_PATH' />
+	<directory path='/var/tmp/unreadable' mode='0000'
+	    user='noaccess' group='noaccess' />
 </managed_paths>
 ```
 
@@ -154,13 +168,14 @@ permissions. For example, this allows someone to specify first
 `/var/run/myservice` and then follow it with `/var/run/myservice/data`.
 
 If there is more than one `managed_paths` section in a service, then
-they will be concatenated together. All **service** level
-`managed_paths` will be processed before **instance** level
-`managed_paths`.
+they will be concatenated together; the DTD permits any number of
+`managed_paths` blocks on both the service and instance elements. All
+**service** level `managed_paths` will be processed before **instance**
+level `managed_paths`.
 
 When entries are added to the environment, the starting environment will
 be that as described by the `environment` section of the Method Context
-(see [`smf_method(5)`](https://illumos.org/man/5/smf_method). This means
+(see [`smf_method(7)`](https://illumos.org/man/7/smf_method)). This means
 that when checking if an environment variable exists for appending, then
 anything described there such as `PATH` will already exist.
 
@@ -198,15 +213,15 @@ installed under `/opt/ooce`, configuration lives in `/etc/opt/ooce`, and
 various software in `/var` is found with the `/opt/ooce` directory
 appended to collect it all.
 
-* The core OpenIndiana, OmniOS, and SFE repositories look more
-use `/usr`, `/var`, and `/etc` in a similar way. Each owning parts of
-that corresponding name space.
+* The core OpenIndiana, OmniOS, and SFE repositories are more
+traditional, using `/usr`, `/var`, and `/etc` in a similar way. Each
+owns parts of that corresponding name space.
 
 Based on all these differences, it seems that there is value in allowing
 illumos distributions to continue to deliver service manifests in a way
 that is specific to their environment and their druthers. While illumos
 does have recommended locations for all of the different pieces (e.g.
-[`filesystem(5)`](https://illumos.org/man/5/filesystem), there are
+[`filesystem(7)`](https://illumos.org/man/7/filesystem)), there are
 multiple ways to integrate packages and there's value in retaining this
 flexibility. If we picked something, at least some of the above would
 have to change and be frustrated by that. In general, I believe that SMF
@@ -241,9 +256,16 @@ support creating the directories. There could be several transient-style
 services where creating directories of the correct permissions is
 useful.
 
-The only reason not to do this is risk of gathering the associated
-method context when we didn't before. However, it seems like it is
-worthwhile to do so so we can have a uniform experience in the system.
+The risk in doing so is gathering the associated method context where we
+did not before. To confine that risk to services which opt in, the method
+context is only gathered early when the instance has managed paths. A
+`:true` service with managed paths and an invalid method context (for
+example, a user that does not exist) is placed in maintenance, whereas
+that context was not examined before. Conversely, a `:true` service
+without managed paths keeps its current behaviour, and no name service
+lookups are added to its start path, which is important for services that
+run early in boot. Stop methods are unchanged, so a broken context cannot
+prevent a service from stopping.
 
 ### Environment Variables
 
@@ -273,19 +295,23 @@ example, postgres supports the
 environment variable which tells it where the data directory for the
 database is. Being able to create that directory for a specific
 instance, using the token expansion, and then setting the appropriate
-environment variable further reduces the complexity start method.
+environment variable further reduces the complexity of the start
+method.
 
 * Because we want to allow for the appending of variables, it seems like
 it makes more semantic sense to start from the existing method. This
 would allow certain things like the `PATH` or other directory based
 environment variables to be updated based on per-instance values.
 
-These different ideas have led me to suggest that we should honor the
-existing Method Context environment settings and that if we want the two
-to co-exist this is the only way that makes semantic sense.  Because the
-Method Context is always defined to set the environment to a known
-state, it makes sense to think of that as starting and creating the base
-environment and amending it to this point.
+These different ideas lead to the following behavior. Multiple entries
+may name the same variable; each appends in processing order, separated
+by a `:`. Additions always append to, and never replace, the Method
+Context environment. Since the Method Context is always defined to
+set the environment to a known state, it forms the base environment and
+managed paths amend it. That base includes the default method
+environment (`PATH=/usr/sbin:/usr/bin` and the variables derived from
+`/etc/default/init`), so exporting a directory into `PATH` extends the
+default path rather than replacing it.
 
 ### Existing Directories: Ownership and Permissions
 
@@ -321,25 +347,31 @@ While this kind of configuration isn't recommended, it is certainly
 possible today and many start methods that are trying to create
 corresponding directories are running as root already!
 
-In the second service started and created its directory path, then we'd
-initially have `/var/run/net` owned by the user and group `root` with
-the permissions `0755`. However, when the first service started up, it'd
-change that to the service's user and group and probably `0770`, this
-cutting off access to the second service. This isn't great, but it's not
-clear that because of this we should take active steps to prevent it
+If the second service started first and created its directory path, then
+we'd initially have `/var/run/net` owned by the user and group `root`
+with the permissions `0755`. However, when the first service started up,
+it'd change that to the service's user and group and probably `0770`,
+thus cutting off access to the second service. This isn't great, but it's
+not clear that because of this we should take active steps to prevent it
 from happening as one could also create something where this makes sense.
 
 One place where this gets messy though is the question of ownership of
 the files and directories that exist in the directory. systemd says that
 it will always recursively change the ownership of contents under the
-directory to match the parent. Though it notes that it has an
-optimization where in if everything in the target directory matches then
-it will not do anything else. We should consider a similar feature. The
-main argument for this, in my opinion, is the service upgrade feature
-set. When we upgrade a service and change the user, it would be useful
-if it then had full control over all the files and subdirectories that
-it owned. While such a feature would further complicate the overlapping
-service problem, it does seem like something worthwhile.
+directory to match the parent, with an optimization where nothing is
+done when everything already matches. This is tricky - recursively
+changing ownership requires a privileged walk over data that others may
+be able to influence, with all of the TOCTTOU concerns discussed below,
+and it makes the overlapping-services problem worse. The main argument in
+its favour is the service upgrade feature. When we upgrade a service and
+change the user, it would be useful if it then had full control over all
+the files and subdirectories that it owned.
+
+If we don't do this initially, the common runtime-directory case is
+already covered by `empty`, which produces a directory whose contents
+will be created under the new credentials. Should the service-upgrade use
+case prove important in practise, a `chown_contents` boolean attribute
+can be added compatibly later, with the systemd-style optimization.
 
 ### Cleaning Directories
 
@@ -397,20 +429,32 @@ makes it more visible. While it's true that we are punting this problem
 onto the folks packaging software, I'm not sure that's any less true
 than it already was.
 
-One thing that we should consider is what amount of safe guards should
-we add in here? Should we make sure that we're not descending into
-`/dev`, `/devices/`, `/system`, or `/proc`?
+For that reason, no prefix denylist is applied when creating or cleaning
+directories. It is difficult to produce a complete list and a manifest is
+already privileged input. There are structural safeguards - for example
+the expanded path must be absolute and may not contain `.` or `..`,
+symbolic links are refused and cleaning doesn't follow symbolic links. A
+mount point inside a directory being emptied causes the removal to fail
+and the service to enter maintenance, rather than the mounted filesystem
+being cleaned.
+
+Furthermore, a directory is only emptied when it already existed. The
+directory is rescanned until a pass finds nothing left to remove, with
+the number of passes bounded so that a concurrent writer cannot block the
+restarter indefinitely. Races with concurrent creation, including a
+subdirectory gaining new content between being emptied and removed, fall
+under best effort rules rather than failing the start. Hard removal
+failures put the service in maintenance.
 
 ### Other Security Considerations
 
 When walking a directory tree, there is an inherent [TOCTTOU
 vulnerability](https://en.wikipedia.org/wiki/Time-of-check_to_time-of-use).
 For example, if someone maliciously replaces a directory with a symbolic
-link or similar, that can be a trickier thing to handle.  One solution
-is to basically do all the manipulation of the permissions and ownership
+link or similar, that can be a trickier thing to handle. This is
+addressed by doing all manipulation of the permissions and ownership
 using operations on file descriptors (e.g. fchown(2), fchmod(2), etc.)
-and always using openat(2) to always move forward one directory at a
-time.
+and using openat(2) to move forward one directory component at a time.
 
 However, if something else has elevated permissions, being root on the
 intermediate path, or an administrator has set a service to run on a
@@ -419,27 +463,49 @@ do to prevent something malicious from happening. Even if we take care
 of creating our directories, there's nothing that stops something else
 from manipulating those.
 
-We need to think carefully about whether or not we should honor symbolic
-links found as we incrementally process these directories. While we
-should never follow symbol links on clean up, it's an interesting
-question on what we should do along the way.
+Symbolic links are not permitted at any component of a managed path.
+The component walk opens each component with `O_NOFOLLOW`, so a
+pre-existing symbolic link anywhere in the path, including the final
+component, causes the start to fail and the service to enter
+maintenance. This is stricter than what a start method running
+`mkdir -p` would do, but it removes the ability to redirect the
+privileged chown, chmod, and cleaning operations by substituting a link.
+The standard locations that these paths pass through on illumos systems
+(`/var/run`, `/etc/svc/volatile`, and so on) are real directories or
+mount points rather than symbolic links, so the restriction is not
+expected to be a problem in practice.
 
-## Open Questions
+## Resolved Questions
 
-This section contains open questions that we want to answer:
+This section records the answers to questions that earlier drafts left
+open:
 
-1. We should likely add support for recursively chowning the contents of
-a directory as discussed in the `Existing Directories: Ownership and
-Permissions` section.  Should this be something that a service can opt
-out of like the emptying of the directory? If we do this, should the
-same optimization be done like systemd? If so, should we allow that to
-be controlled?
+1. Recursive chowning of a directory's contents is not part of the
+initial implementation. See the `Existing Directories: Ownership and
+Permissions` section for the reasoning, and for the compatible path to
+adding it later as an opt-in attribute.
 
-2. What precautions should we take when cleaning up directories
-specified by a user? Should we try to look at the directories and refuse
-to create or operate on certain prefixes (e.g. `/dev`, `/proc`, etc.)?
-Some of that we won't be able to do until after token expansion of the
-path has been completed.
+2. No prefix denylist is applied when creating or cleaning directories.
+The structural safeguards that apply instead are described in the
+`Cleaning Directories` section.
 
-3. How should we handle symbolic links that we encounter while tying to
-expand the directory path.
+3. Symbolic links are refused at every component of a managed path. See
+the `Other Security Considerations` section.
+
+## Documentation
+
+The feature is documented in a new Managed Paths subsection of
+[`smf_method(7)`](https://illumos.org/man/7/smf_method), alongside the
+existing Method Context wording. The `managed_paths` and `directory`
+elements are added to the service bundle DTD,
+`/usr/share/lib/xml/dtd/service_bundle.dtd.1`, and a `pg_pattern`
+template for the new property group is added to the global service
+template so that `svccfg describe` can explain it.
+
+## Testing
+
+A test suite in util-tests exercises the manifest path end to end.
+
+The runtime behavior in `svc.startd` requires a live system and is
+verified manually.
+

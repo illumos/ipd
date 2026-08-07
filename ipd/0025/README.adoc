@@ -111,38 +111,38 @@ unauthenticated profile sets for the user, in that order, and return the
 attribute overrides as necessary.
 
 If, however, the flag is **not** set, then the authenticated set will be
-inspected first and, if a match is found, the user is authenticated before
+inspected first and, if a match is found, the user will be authenticated before
 `pfexecd` tells the kernel whether the command may proceed. Authentication
-happens synchronously, within the upcall, and in a process tree which is
+will happen synchronously, within the upcall, and in a process tree which is
 unrelated to the process being authenticated:
 
-- `pfexecd` replies to the initial upcall indicating that authentication
+- `pfexecd` will reply to the initial upcall indicating that authentication
   is required.
-- The kernel repeats the upcall, this time attaching a door descriptor for
-  the calling process's controlling terminal, opened in-kernel in the same
-  way as an open of `/dev/tty` by the caller. If the caller has no
-  controlling terminal then the authenticated profile set is not consulted
-  at all, and only the unauthenticated profiles apply.
-- `pfexecd` runs a helper process - `pfauth` - handing it the terminal.
-  The helper grafts the terminal onto its own session using a new terminal
-  ioctl, `TIOCGRAFT`, so that `/dev/tty` resolves to it; this is required
-  by getpassphrase(3C), used in the PAM conversation, and by any PAM
-  module which opens the terminal directly. The graft is one-way - the
+- The kernel will repeat the upcall, this time attaching a door descriptor
+  for the calling process's controlling terminal, opened in-kernel in the
+  same way as an open of `/dev/tty` by the caller. If the caller has no
+  controlling terminal then the authenticated profile set will not be
+  consulted at all, and only the unauthenticated profiles will apply.
+- `pfexecd` will run a helper process - `pfauth` - handing it the terminal.
+  The helper will graft the terminal onto its own session using a new
+  terminal ioctl, `TIOCGRAFT`, so that `/dev/tty` resolves to it; this is
+  required by getpassphrase(3C), used in the PAM conversation, and by any
+  PAM module which opens the terminal directly. The graft is one-way - the
   terminal's own session and foreground process group bindings, and hence
-  job control in the user's shell, are unaffected. The helper then
-  authenticates the user via https://illumos.org/man/3PAM/pam[pam(3PAM)]
-  and generates the audit record.
-- If authentication succeeds, the reply from `pfexecd` carries the attribute
-  overrides from the user's full profile set, and instructs the kernel to
-  set the `PRIV_PFEXEC_AUTH` flag on the new process credentials, so that
-  commands executed from an authenticated process (for example a profile
-  shell) do not prompt again, and so that the flag is visible to
-  `chkauthattr_ucred()`. If authentication fails, the reply denies
-  execution and the exec(2) fails with `EACCES`.
+  job control in the user's shell, are unaffected. The helper will then
+  authenticate the user via https://illumos.org/man/3PAM/pam[pam(3PAM)]
+  and generate the audit record.
+- If authentication succeeds, the reply from `pfexecd` will carry the
+  attribute overrides from the user's full profile set, and instruct the
+  kernel to set the `PRIV_PFEXEC_AUTH` flag on the new process credentials,
+  so that commands executed from an authenticated process (for example a
+  profile shell) do not prompt again, and so that the flag is visible to
+  `chkauthattr_ucred()`. If authentication fails, the reply will deny
+  execution and the exec(2) will fail with `EACCES`.
 
-Because the process being authenticated remains blocked in exec(2)
-throughout, and never itself executes any interim helper, its environment
-is never exposed to a privileged component and is passed unchanged to the
+Since the process being authenticated will remain blocked in exec(2)
+throughout, never executing any interim helper, its environment will not
+be exposed to a privileged component and will be passed unchanged to the
 final target, subject to the usual pfexec scrubbing rules.
 
 
@@ -184,25 +184,44 @@ final target, subject to the usual pfexec scrubbing rules.
    or denied                |             the caller's environment
 ----
 
-1. When replying after a successful authentication, pfexecd includes the
+1. When replying after a successful authentication, pfexecd will include the
    authenticated profiles when checking for additional Authorisations and
-   exec attributes to assign, and the kernel records the authentication
+   exec attributes to assign, and the kernel will record the authentication
    by setting the `PRIV_PFEXEC_AUTH` flag in the new process credentials.
 
 == PAM Authentication
 
-The `pfauth` command authenticates the invoking user via PAM using `pfexec` as
-the service name. If nothing is explicitly defined for this service in
-https://illumos.org/man/5/pam.conf[pam.conf(5)] the user will typically be
-required to enter their own login password.
+The `pfauth` command will authenticate the invoking user via PAM using
+`pfexec` as the service name. If nothing is explicitly defined for this
+service in https://illumos.org/man/5/pam.conf[pam.conf(5)] the user will
+typically be required to enter their own login password.
 
 == Caching
 
-It may be convenient to support caching a successful authentication for a short
-time to avoid repeated prompts for authentication, although entering a profile
-shell is probably more convenient in general. This can be achieved with a
-caching PAM module if necessary - no support for caching will be built into
-`pfexecd` itself.
+Two levels of authentication caching will be available with this scheme.
+
+The first is a consequence of the `PRIV_PFEXEC_AUTH` flag being inherited
+across fork and exec. Authenticating once for a command which is itself a
+profile shell, for example `pfexec pfsh`, will drop into a shell from which
+every subsequent command uses the authenticated profile set without further
+prompts, for the lifetime of that shell.
+
+The second, for the sudo-style workflow of repeated discrete `pfexec`
+invocations from an ordinary shell, will be time-based caching via the
+existing pam_timestamp(7) module, enabled by the administrator with an
+explicit `pfexec` auth stack in pam.conf(5):
+
+[source]
+----
+pfexec auth sufficient  pam_timestamp.so.1
+pfexec auth requisite   pam_authtok_get.so.1
+pfexec auth required    pam_unix_auth.so.1
+----
+
+A method of discarding authentication state for the current user and terminal
+will also be added via `pfexec -k`, as `sudo -k` does. This will be
+implemented through the same trust path as authentication itself, ending
+with a call to `pam_setcred(PAM_DELETE_CRED)`.
 
 == Affected components
 
@@ -218,8 +237,9 @@ execattr_t *getexecuser(const char *username, const char *type,
     const char *id, int search_flag);
 ----
 
-The `search_flag` parameter will be extended to accept two new flags to control
-which of the authenticated and unauthenticated profile sets is searched.
+The `search_flag` parameter will be extended to accept two new flags to
+control which of the authenticated and unauthenticated profile sets is
+searched.
 
 `GET_PROF`::
 
@@ -240,22 +260,22 @@ also the behaviour when both flags are present. In this way, backwards
 compatibility with the existing behaviour is preserved.
 
 NOTE: There is also a private `_enum_profs()` function used by a small number
-of components, which will need similar changes.
+of components, which will be extended in the same way.
 
 === auth_attr - chkauthattr()
 
 Checking a user's Authorisations is primarily done through the
 https://illumos.org/man/3SECDB/chkauthattr[chkauthattr(3SECDB)] function
-in https://illumos.org/man/3LIB/libsecdb[libsecdb(3LIB)] has the following
-signature:
+in https://illumos.org/man/3LIB/libsecdb[libsecdb(3LIB)], which has the
+following signature:
 
 [source,c]
 ----
 int chkauthattr(const char *authname, const char *username);
 ----
 
-With the introduction of authenticated rights profiles, this will need
-extending so that it can determine whether the authenticated profiles should be
+With the introduction of authenticated rights profiles, this will be extended
+so that it can determine whether the authenticated profiles should be
 taken into account when checking whether a user has a particular authorisation.
 The basis for considering the authenticated profiles will be whether the uid of
 the calling process matches the uid of the requested user and whether that
@@ -264,8 +284,9 @@ process has the new `PRIV_PFEXEC_AUTH` process flag.
 In several places the authorisation is checked from a server process which is
 not running as the user being checked. To support this without modifying the
 existing `chkauthattr()` function signature, a new `chkauthattr_ucred()`
-variant is introduced. This takes an additional argument by which the caller
-can provide a ucred which should be checked for the `PRIV_PFEXEC_AUTH` flag.
+variant will be introduced. This takes an additional argument by which the
+caller can provide a ucred which should be checked for the `PRIV_PFEXEC_AUTH`
+flag.
 
 [source,c]
 ----
@@ -281,6 +302,22 @@ policy.conf(5) and the user's assigned authenticated profiles are
 checked.
 ----
 
+For both `chkauthattr()` and `chkauthattr_ucred()`, the authenticated
+profiles will only be considered when the subject holds the
+`PRIV_PFEXEC_AUTH` flag and its real UID matches the user being checked. A
+third variant, `chkauthattr_flags()`, will be added. This uses only the
+supplied arguments and lets the caller select the profile sets explicitly:
+
+[source,c]
+----
+int chkauthattr_flags(const char *authname, const char *username,
+    uint_t flags);
+----
+
+This is for callers checking the authorisations of users other than the
+process owner. For example a daemon that's processing a client-supplied
+username passes only `CHKAUTHATTR_PROFILES`.
+
 Some Authorisations are usable without a call to `pfexec`. For example, the
 `Service Management` profile grants the following Authorisations and has no
 `exec_entries`:
@@ -295,7 +332,7 @@ Service Management:::Manage services:auths=solaris.smf.manage,solaris.smf.modify
 
 For users/roles which are granted a profile like this via `auth_profiles`,
 a mechanism is needed whereby they can be prompted for authentication. To
-support this, new helper profiles will be introduced that cover the
+support this, new helper profiles can be created that cover the
 necessary commands, but have no attributes defined in the exec_attr entry.
 This will cause `pfexecd` to request authentication but fall back to the
 standard execution path once authenticated (or directly if granted via just
@@ -306,11 +343,19 @@ A helper profile for `Service Management` would look like:
 [source,shell]
 ----
 % getent prof_attr Service\ Management\ (auth helper)
-Service Authentication:::Authenticated profile helper:
+Service Management (auth helper):::Authenticated profile helper:
 % getent exec_attr Service\ Management\ (auth helper)
 Service Management (auth helper):solaris:cmd:::/usr/sbin/svcadm:
 Service Management (auth helper):solaris:cmd:::/usr/sbin/svccfg:
 ----
+
+Since profile lookup stops at the first entry matching a command, the
+attribute-less entries in a helper profile can mask an entry for the same
+command in a profile appearing later in a user's ordered profile list. A
+locally defined profile which assigns attributes to one of the helper
+commands must therefore be placed before any stock profile which includes
+a helper. This will be documented in user_attr(5) and in the prof_attr data
+file.
 
 === getent(8)
 
@@ -336,7 +381,8 @@ Zone Management
 Software Installation,Service Management
 ----
 
-NOTE: There is no man page for this utility; one should be written.
+NOTE: There is no man page for this utility; one will be written as part of
+this work.
 
 === profiles(1)
 
@@ -363,7 +409,7 @@ All
 ----
 
 To restrict output to profiles not requiring authentication, the new
-`-X` flag is used:
+`-X` flag will be used:
 
 [source,shell]
 ----
@@ -373,7 +419,7 @@ Basic Solaris User
 All
 ----
 
-and `-x` shows only the authenticated profiles:
+and `-x` will show only the authenticated profiles:
 
 [source,shell]
 ----
@@ -383,7 +429,7 @@ ZFS File System Management
 Service Management
 ----
 
-A new `-v` option adds more detail; initially just the authentication
+A new `-v` option will add more detail; initially just the authentication
 requirement:
 
 [source,shell]
@@ -397,8 +443,8 @@ Basic Solaris User
 All
 ----
 
-As an additional enhancement to `profiles`, a new `-c` option allows retrieving
-the profiles that are applicable to a specified command:
+As an additional enhancement to `profiles`, a new `-c` option will allow
+retrieving the profiles that are applicable to a specified command:
 
 [source,shell]
 ----
@@ -447,7 +493,7 @@ A convenience option will be added to complement the existing `-A`, `-P` and
 === usermod(8)
 
 As with `useradd`, the `-K` option can be used to modify the `auth_profiles`
-for a user. The `-X` convenience option will be added here too complement
+for a user. The `-X` convenience option will be added here too, complementing
 `-A`, `-P` and `-R`.
 
 [source]
@@ -462,8 +508,8 @@ for a user. The `-X` convenience option will be added here too complement
 
 === passmgmt(8)
 
-As above, a new `-X` option will be added here too to support being called from
-useradd/usermod. As with the other passed-through options, this will not be
+As above, a new `-X` option will be added here too to support being called
+from useradd/usermod. As with the other passed-through options, it will not be
 documented in the manual but the documented `-K` flag can be used to explicitly
 set `auth_profiles`.
 
@@ -476,8 +522,8 @@ for managing flags.
 This utility will be updated to accept a new `-f` option that can be used to
 flexibly set and unset process flags. The existing `-D`, `-M`, `-N`, and
 the undocumented `-P` and `-x` options will be retained but re-implemented in
-terms of the new flag. This option will also be updated with support for the
-new `PRIV_EXEC_AUTH` flag.
+terms of the new option, which will also support the new `PRIV_PFEXEC_AUTH`
+flag.
 
 [source]
 ----
@@ -485,7 +531,7 @@ new `PRIV_EXEC_AUTH` flag.
      Set or unset process flags.  With '+' the listed flags are set,
      and with '-' the flags are unset.  Available flags are:
 
-	 A     PRIV_EXEC_AUTH
+	 A     PRIV_PFEXEC_AUTH
 
 	 D     PRIV_DEBUG
 

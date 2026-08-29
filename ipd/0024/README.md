@@ -113,9 +113,13 @@ To build out support for SystemReady ES, the following hardware could be used:
   - The board supports up to 64G of RAM.
   - The SoC contains a GICv3, which the port does not yet support.
 
-To test SystemReady SR support, the only cost-effective option for bringup
-activities is the [Qemu sbsa-ref](
-https://www.qemu.org/docs/master/system/arm/sbsa.html) platform.
+To build out support for SystemReady SR, the following hardware could be used:
+- Asrock Rack ALTRAD8UD-1L2T
+  - [Bundle with Ampere Altra Q64-22](
+    https://www.newegg.com/global/uk-en/asrock-rack-altrad8ud-1l2t-q64-22-ampere-altra-max-ampere-altra-processors/p/N82E16813140134) (64 cores, 2.2GHz, Neoverse-N1)
+  - [Bundle with Ampere Altra M128-26](
+    https://www.newegg.com/global/uk-en/asrock-rack-altrad8ud-1l2t-q64-22-ampere-altra-max-ampere-altra-processors/p/N82E16813140135) (128 cores, 2.6GHz, Neoverse-N1)
+  - Qemu [sbsa-ref](https://www.qemu.org/docs/master/system/arm/sbsa.html)
 
 ### The Arm Base System Architecture
 

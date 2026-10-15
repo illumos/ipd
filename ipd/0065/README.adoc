@@ -1,0 +1,548 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Jason King <jason.brian.king@gmail.com>
+:sponsor: TBD
+
+= IPD 65 MAC packet DMA framework for network drivers
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+== Introduction
+
+Network drivers must translate a packet represented as one or more
+`mblk_t` instances into a sequence of DMA descriptors that their NIC can
+consume.  They must also allocate, map, recycle, and, where practical, loan
+the DMA buffers used by receive rings.  These tasks are necessary for most
+high-performance NICs, but their implementation is complex and is repeated
+in every driver.
+
+The ice driver provides a representative example.  Its TX path decides
+whether to bind individual `dblk_t` instances or copy their contents into
+pre-mapped buffers, accounts for DMA cookies and hardware descriptor limits,
+and retains the packet until the NIC completes it.  Its RX path preallocates
+single-cookie buffers, replaces a buffer before loaning it with
+`desballoc(9F)`, and copies when loaning is unsuitable or resources are
+unavailable.  These are broadly useful policies, but they should not need to
+be independently reimplemented by every driver.
+
+Centralizing this work also gives MAC control over the aggregate DMA memory
+used by a device's TX and RX rings.  Simple per-ring allocation strategies
+used by some drivers can consume substantially more kernel memory than is
+needed to keep the NIC busy when a device has many rings.  A framework-owned
+pool can apply device-wide limits and distribute buffers among rings, retaining
+enough resources for throughput without multiplying an excessive reserve by
+the ring count.
+
+This IPD proposes an opt-in packet-DMA facility in the `mac` module.  A
+participating driver continues to allocate and program its descriptor rings,
+owns all device registers and completion interpretation, and chooses when a
+ring starts and stops.  The framework owns the DMA resources that describe
+packet payloads:
+
+* On TX, it retains the packet, selects copy or bind, creates DMA mappings,
+  and releases the packet after the driver reports completion.
+* On RX, it allocates and maps the buffers supplied to a ring, turns
+  completed buffers into copied or loaned `mblk_t` instances, and returns
+  replacement buffers to the driver.
+
+The facility does *not* allocate descriptor rings, write descriptors, ring
+doorbells, or determine device completion state.  Those are device-specific
+operations and remain the driver's responsibility.
+
+== Goals and non-goals
+
+The goals of this work are to:
+
+* Provide a common implementation of packet DMA binding, copying, buffer
+  pooling, packet lifetime, and receive loaning.
+* Let a driver express its DMA and descriptor constraints without exposing
+  framework-private packet or buffer structures.
+* Preserve batching: a driver can prepare several TX packets before one
+  doorbell write, and can report multiple RX packets from an interrupt or
+  polling path.
+* Permit notification from interrupt context and permit MAC to ask the
+  driver to reclaim completed TX work before it requeues a packet.
+* Leave rings, ring indexing, descriptors, and device error recovery under
+  driver control.
+
+The initial work will not:
+
+* Change the behavior, callback path, ABI contract, or performance
+  requirements of a driver that does not opt in.
+* Convert a legacy `mc_tx` or `mri_tx` callback through this framework.
+* Support a driver whose RX hardware requires a multi-cookie buffer for one
+  descriptor.  Such a driver can continue to use its current RX path.
+* Prescribe a descriptor format, completion queue format, or lock discipline
+  for a driver.
+
+== Opt-in registration and compatibility
+
+This facility is per ring, not device-wide.  It will be added as a new,
+versioned optional extension to `mac_ring_info_t`, tentatively named
+`mri_pkt_dma`.  A driver supplies this extension only for rings that use the
+facility.  The extension is considered valid only when its version and
+`mpdr_flags` request at least TX or RX support.  A zero or `NULL` extension
+selects the existing ring path.
+
+The existing `mac_callbacks_t` and `mac_ring_info_t` callbacks remain valid
+and retain their current meanings.  Their use by a non-participating driver
+will not gain conditional dispatches through the packet-DMA implementation.
+The extension will be introduced using the normal versioned MAC provider
+interfaces, so an old driver can register unchanged and a new driver can
+continue to run on a system which does not recognize the extension by not
+advertising it.
+
+The exact structure and flag names will be finalized with the prototype; the
+following shows the intended contract:
+
+----
+typedef struct mac_pkt_dma_ring_info {
+        uint_t                  mpdr_version;
+        uint_t                  mpdr_flags;
+        void                    *mpdr_driver;
+        uint_t                  mpdr_tx_ring_slots;
+        uint_t                  mpdr_tx_max_slots;
+        ddi_dma_attr_t          mpdr_tx_bind_attr;
+        ddi_dma_attr_t          mpdr_tx_lso_bind_attr;
+        ddi_dma_attr_t          mpdr_tx_copy_attr;
+        size_t                  mpdr_tx_copy_buf_size;
+        uint_t                  mpdr_tx_lso_max_xfers;
+        uint_t                  mpdr_tx_lso_flags;
+        ddi_dma_attr_t          mpdr_rx_attr;
+        size_t                  mpdr_rx_buf_size;
+        uint_t                  mpdr_rx_buf_count;
+        mac_pkt_tx_prep_t       mpdr_tx_prep;
+        mac_pkt_tx_start_t      mpdr_tx_start;
+        mac_pkt_tx_reclaim_t    mpdr_tx_reclaim;
+        mac_pkt_rx_post_t       mpdr_rx_post;
+} mac_pkt_dma_ring_info_t;
+----
+
+`mpdr_driver` is driver-private, opaque state.  It fills the same role as
+`mri_driver` for existing ring callbacks and is passed unchanged to every
+operation in this extension.
+
+The extension describes the following immutable constraints:
+
+* The number of usable TX descriptor slots and the maximum number a TX packet
+  may consume.  The framework uses the first value to maintain its free-slot
+  count and the latter to decide when to query for newly completed work.  The
+  maximum includes context descriptors and is not necessarily the number of
+  DMA cookies.
+* Separate DMA attributes for memory bound from a packet and memory from the
+  framework's preallocated copy pool, plus the copy-buffer size.  The latter
+  must produce a single cookie for each copy buffer.  The LSO binding
+  attributes may differ from ordinary TX binding attributes.  This lets a
+  driver impose its address, alignment, maximum-transfer, and boundary
+  requirements.
+* The RX DMA attributes, buffer size, and target number of buffers.  Each RX
+  buffer supplied by the framework has exactly one DMA cookie.  The
+  framework rejects a configuration that cannot meet that condition.
+
+The framework copies these descriptors at registration.  A driver may release
+or reuse its source storage after the ring information callback returns.
+Attribute validation occurs before a ring is made available to clients; an
+invalid opt-in configuration fails registration rather than silently falling
+back to the legacy path.
+
+TX and RX are independently selectable.  For example, a driver may initially
+adopt only the RX pool while retaining its current TX implementation.
+
+=== Buffer sizes and jumbo frames
+
+Neither `mpdr_tx_copy_buf_size` nor `mpdr_rx_buf_size` is required to be as
+large as the interface SDU.  The framework will split a copied TX packet
+across as many preallocated copy buffers as necessary, and an RX frame may
+occupy multiple posted RX buffers.  A participating driver must therefore
+handle every cookie returned for a TX packet and every receive segment
+reported for an RX frame; it must not assume that one packet occupies one DMA
+buffer or descriptor.
+
+This is particularly important for jumbo frames.  Requiring every posted RX
+buffer to contain a full jumbo frame can require the allocation of a large
+number of physically contiguous DMA buffers.  Under memory pressure, such
+allocations can block for long enough to effectively livelock the system.
+Smaller single-cookie buffers allow the hardware and framework to represent a
+jumbo frame with several descriptors without imposing that allocation
+pressure.
+
+=== Large-send offload constraints
+
+`mpdr_tx_max_slots` bounds the total descriptor slots consumed by an original
+packet.  It is not sufficient to describe devices which impose a distinct
+limit on the DMA transfers used to emit each MSS-sized packet from an LSO
+request.  The extension therefore includes `mpdr_tx_lso_bind_attr`,
+`mpdr_tx_lso_max_xfers`, and `mpdr_tx_lso_flags`.
+
+`mpdr_tx_lso_bind_attr` describes binding an entire LSO request, which may
+have more cookies than a non-LSO packet.  `mpdr_tx_lso_max_xfers` limits the
+DMA transfers used for every hardware-emitted MSS-sized packet, including
+any header transfers.  The LSO flags describe required layout properties,
+such as `MAC_PKT_DMA_LSO_HDR_SINGLE_COOKIE`, which requires MAC to place the
+header in its own single-cookie copy buffer before the payload.  Further
+flags may describe device requirements discovered during implementation
+without changing the base callback interface.
+
+MAC uses the normalized offload information, the MSS, and these constraints
+when it chooses copies and mappings for an LSO packet.  It may copy a header
+or a whole MSS-sized payload region to ensure that each emitted segment meets
+the driver's per-MSS limit.  If it cannot construct such a layout, it does
+not invoke `mpdr_tx_prep` with an invalid packet; it follows the normal TX
+resource/error policy instead.
+
+=== Packet DMA policy
+
+The thresholds that select TX DMA binding versus copying and RX loaning versus
+copying are managed by the packet-DMA framework.  An opt-in driver supplies
+its immutable DMA and descriptor constraints, but does not implement its own
+threshold properties or make per-packet policy decisions.  This permits MAC
+to apply a consistent policy and to tune it without duplicating that work
+across drivers.
+
+It remains TBD whether these controls should initially be private, hidden MAC
+properties or public properties visible only for drivers with an opt-in ring.
+The initial implementation will retain enough internal observability to tune
+the policy in either case.  The choice of property visibility will not alter
+the driver callback contract.
+
+== TX operation
+
+The normal MAC scheduler still chooses a TX ring and orders packets.  For an
+opt-in ring, it gives each packet to the packet-DMA framework instead of
+calling `mri_tx` directly.  MAC keeps the original `mblk_t` private and
+prepares an opaque `mac_pkt_t` for the driver.  Preparation includes
+calculating offload metadata, selecting copy or bind for each data block,
+performing any required DMA synchronization, and producing a bounded sequence
+of DMA cookies that meets the ring's advertised constraints.
+
+The driver is called as follows:
+
+----
+uint_t
+prefix_mp_tx_prep(void *driver, mac_pkt_t *pkt);
+
+void
+prefix_mp_tx_start(void *driver);
+
+uint_t
+prefix_mp_tx_reclaim(void *driver);
+----
+
+The `prefix_` denotes the driver's normal naming prefix; the actual
+operations are supplied as `mpdr_tx_prep`, `mpdr_tx_start`, and
+`mpdr_tx_reclaim`.
+
+`mpdr_tx_prep` writes all descriptors for one prepared packet, but does not
+make them visible to the device.  It returns the number of ring slots
+consumed, including any non-data descriptors.  A positive return consumes
+that many slots and commits the packet to the framework's completion queue.
+A zero return means that the driver does not presently have sufficient slots;
+it must not modify the descriptor ring in that case.  The framework releases
+any provisional mapping and retains the original packet for a later attempt.
+
+After one or more successful prepare calls, MAC invokes `mpdr_tx_start` once.
+The driver performs the device-specific synchronization and doorbell write
+needed to transmit all prepared descriptors.  It must not wait for completion
+in this callback.
+
+`mpdr_tx_reclaim` examines the driver's completion state and returns the
+number of newly completed descriptor slots, in FIFO order.  MAC may call it
+when it has a queued packet but has fewer free slots than the packet could
+require.  This allows MAC to avoid needlessly requeueing a packet when the
+device has completed more work since the last interrupt.  It may also be
+called as part of normal scheduled service.
+
+The driver can instead, or additionally, report completion from its interrupt
+handler:
+
+----
+void
+mac_pkt_tx_reclaim(mac_ring_handle_t ring, uint_t slots);
+----
+
+`slots` is the contiguous number of completed slots beginning at the oldest
+outstanding slot known to the framework.  The call is safe from interrupt
+context and does not sleep.  MAC accounts for the returned slots against the
+FIFO of successful `mpdr_tx_prep` calls.  It releases the DMA mappings and
+the underlying `mblk_t` only after every slot for that packet has completed.
+The driver must report neither a partial packet completion nor a completion
+that passes an incomplete packet; drivers with out-of-order hardware
+completions must coalesce them to this ordered interface.
+
+The framework schedules a stalled TX ring after either reclaim path returns
+slots.  A driver therefore no longer calls `mac_tx_ring_update()` for work
+owned by this framework.  It continues to use the existing notification for
+any legacy ring.
+
+=== TX packet accessors
+
+`mac_pkt_t` is deliberately opaque.  It is valid only during
+`mpdr_tx_prep`; a driver must not save it or any pointer returned by an
+accessor.  The following accessors are proposed:
+
+----
+mblk_t *
+mac_pkt_mblk(mac_pkt_t *pkt);
+
+const mac_ether_offload_info_t *
+mac_pkt_offload_info(const mac_pkt_t *pkt);
+
+uint_t
+mac_pkt_dma_cookie_count(const mac_pkt_t *pkt);
+
+void
+mac_pkt_dma_iter_init(const mac_pkt_t *pkt, mac_pkt_dma_iter_t *iter);
+
+boolean_t
+mac_pkt_dma_iter_next(mac_pkt_dma_iter_t *iter, ddi_dma_cookie_t *cookie);
+----
+
+`mac_pkt_mblk()` returns the original packet for driver operations which
+require packet data in addition to DMA addresses.  It does not transfer
+ownership.  `mac_pkt_offload_info()` returns the same normalized
+`mac_ether_offload_info_t` which drivers currently obtain by invoking
+`mac_ether_offload_info()` themselves.  The framework performs that work
+once, before invoking the driver.
+
+`mac_pkt_dma_cookie_count()` returns the number of `ddi_dma_cookie_t`
+instances in the prepared packet.  Its value is exactly the number of times
+that `mac_pkt_dma_iter_next()` returns `B_TRUE` for an iterator initialized
+for the same packet.  A driver can therefore size its descriptor work without
+first walking the iterator.
+
+The iterator produces one `ddi_dma_cookie_t` for each packet data segment.
+It has no exposed length or index so that MAC can revise its copy and binding
+policy without changing the driver interface.  Each iterator is independent
+and starts at the first cookie.  The driver must consume only the cookies
+returned by the iterator; it must not bind any returned `mblk_t` data itself.
+
+Context descriptors, descriptor flags, checksum and LSO programming, and any
+hardware-specific header handling remain driver responsibilities.  In
+particular, the number returned by `mpdr_tx_prep` may exceed the iterator's
+cookie count.  This accommodates devices such as ice that require an
+additional context descriptor for LSO.
+
+=== TX resource policy and errors
+
+MAC uses the supplied attributes and limits to choose between binding a
+`dblk_t` and copying its bytes into a preallocated DMA buffer.  It may copy
+small fragments, recover from a failed binding, or copy enough of a packet to
+meet the driver's cookie and per-transfer limits.  Copy buffers are reused
+only after the matching packet completion.
+
+If MAC cannot prepare a packet because transient packet-DMA resources are
+unavailable, it leaves the packet queued.  If a packet cannot be represented
+within the registered immutable constraints, MAC drops it and increments a
+ring error statistic.  A prepare callback that encounters a device error
+must report it through the driver's existing fault handling, stop or reset the
+ring as appropriate, and return zero; it must not leave partially prepared
+descriptors visible to the device.
+
+== RX operation
+
+Before invoking a driver's ordinary ring-start callback, MAC allocates the
+target number of buffers for each opt-in RX ring and calls:
+
+----
+uint_t
+prefix_mp_rx_post(void *driver, mac_pkt_rxbuf_t *const *bufs, uint_t nbufs);
+----
+
+Each `mac_pkt_rxbuf_t` is opaque and remains owned by MAC.  The callback
+returns the number of buffers it accepted and programmed into currently free
+driver-owned descriptor slots.  It must accept a prefix of the supplied
+array.  MAC retains and retries unaccepted buffers; it never hands one to a
+different ring while it remains posted or pending for this ring.
+
+The callback uses the following accessors to program a descriptor:
+
+----
+boolean_t
+mac_pkt_rxbuf_cookie(const mac_pkt_rxbuf_t *buf, ddi_dma_cookie_t *cookie);
+
+size_t
+mac_pkt_rxbuf_size(const mac_pkt_rxbuf_t *buf);
+----
+
+The cookie has one segment and remains valid until the driver gives the
+buffer back to MAC through a receive or discard operation.  The driver uses
+`cookie.dmac_size` as the DMA capacity when it programs the corresponding RX
+descriptor; that value is not the length of subsequently received data.  The
+driver keeps the buffer token in its own ring bookkeeping.  It owns the
+association between that token and its descriptor index; MAC does not inspect
+or manage the descriptor ring.  Since an RX buffer can be smaller than the
+SDU, the driver must recognize a multi-descriptor frame and report all of its
+buffers in order.
+
+When the device has completed a whole frame, the driver describes it with the
+following interface:
+
+----
+typedef struct mac_pkt_rx_seg {
+        mac_pkt_rxbuf_t *mprs_buf;
+        size_t          mprs_offset;
+        size_t          mprs_length;
+} mac_pkt_rx_seg_t;
+
+int
+mac_pkt_rx_receive(mac_ring_handle_t ring, const mac_pkt_rx_seg_t *segs,
+    uint_t nsegs, const mac_ether_offload_info_t *offload);
+----
+
+There is one `mac_pkt_rx_seg_t` for every descriptor that contributes data to
+the frame.  `mprs_buf` must name a buffer previously accepted by
+`mpdr_rx_post` on this ring.  `mprs_offset` and `mprs_length` are the actual
+data offset and actual number of received bytes in that buffer, respectively;
+they must describe a range within the buffer.  The driver must record this
+received length while processing completion state and report it for every
+buffer in the corresponding `mac_pkt_rx_seg_t`.  The driver may populate
+these segment records as it processes descriptors or immediately before it
+passes the frame to `mac_pkt_rx_receive()`.  In particular, it must not report
+the descriptor's `dmac_size` unless the device actually received that many
+bytes.  A non-zero `mprs_offset` is supported: a driver may reserve headroom
+in a DMA buffer so that, for example, an IPv4 packet or one of its headers has
+the alignment required by the consumer.  `offload` is optional; when supplied,
+it describes validated checksum and other receive offload state.  MAC applies
+it to the resulting packet before passing the packet up through the normal
+receive path.
+
+The driver identifies descriptor completion, errors, and end-of-packet before
+calling this function.  It must not submit a partial frame.  For a completed
+frame that must be dropped, the driver calls:
+
+----
+void
+mac_pkt_rx_discard(mac_ring_handle_t ring, mac_pkt_rxbuf_t *const *bufs,
+    uint_t nbufs);
+----
+
+The referenced buffers are returned to MAC without being passed up the stack.
+Both receive and discard cause MAC to replenish the ring through
+`mpdr_rx_post`.  Replenishment may be immediate, deferred to a taskq, or
+both.  A buffer which is not promptly replaced simply leaves a driver
+descriptor unavailable; MAC records the allocation failure and retries rather
+than reusing a buffer that may have been loaned.
+
+The `mac_ring_handle_t` used by the report functions is the existing handle
+provided to the driver's ring-information callback.  No second driver-visible
+ring handle is introduced by this facility.
+
+For each received segment, MAC decides whether to copy the bytes into a new
+`mblk_t` or loan the DMA buffer with `desballoc(9F)`.  The policy will take
+packet and buffer size, available pool capacity, allocation pressure, and
+the registered configuration into account.  The driver has no dependency on
+that choice.  If a buffer is loaned, its free routine returns it to MAC's
+pool after the network stack releases the message; it is never returned
+directly to the driver.  This centralizes the lifetime management currently
+implemented by drivers such as ice.
+
+MAC performs the DMA synchronization required before examining received
+bytes.  The driver remains responsible for synchronizing descriptor memory
+and for observing device ordering before it reports a frame.
+
+=== RX lifecycle
+
+The ordering around a ring start is:
+
+. MAC validates the ring configuration and allocates RX buffers.
+. MAC invokes `mpdr_rx_post` until the requested initial population is
+  accepted or the driver has no free slots.
+. MAC invokes the driver's existing `mri_start` callback, which enables the
+  device only after it has sufficient programmed descriptors.
+
+On ring stop, MAC first invokes the driver's existing `mri_stop` callback.
+That callback must disable DMA and ensure the device cannot access posted
+buffers.  MAC then removes all posted and pending buffers from the ring.
+Buffers already loaned to upper layers remain valid and are destroyed only
+when their `desballoc()` free routines run.  No callback is made after stop
+until a subsequent successful start.
+
+The framework rejects receive calls for a stopped ring and records them as a
+driver error.  Driver detach continues to use the existing MAC lifetime
+rules, which ensure that a ring and its packet-DMA state are not destroyed
+while an outstanding packet or loaned buffer can reference them.
+
+== Concurrency and ownership
+
+TX and RX callbacks may be invoked from the same execution contexts as their
+current ring operations, including polling and interrupt-driven processing.
+`mpdr_tx_prep`, `mpdr_tx_start`, `mpdr_tx_reclaim`, and `mpdr_rx_post` must
+not sleep.  A driver may use its normal ring lock, but must not call a MAC
+packet-DMA entry point while holding a lock that the corresponding callback
+will acquire.
+
+The ownership transitions are intentionally narrow:
+
+* A TX `mac_pkt_t` is owned by MAC.  It is borrowed by
+  `mpdr_tx_prep`, committed on a positive return, and released by MAC after
+  completion.
+* An RX buffer is owned by MAC, borrowed by `mpdr_rx_post`, and considered
+  posted after that callback accepts it.  It is returned by
+  `mac_pkt_rx_receive` or `mac_pkt_rx_discard`.
+* A driver owns only its descriptor and completion bookkeeping.  It does not
+  free a packet, unbind a packet mapping, create a `desballoc()` buffer, or
+  free an RX buffer supplied by the framework.
+
+These rules make DMA lifetime independent of whether a packet is copied or
+loaned and prevent a driver from reusing an RX buffer while an upper-layer
+consumer still has a reference to it.
+
+== Observability and testing
+
+The framework will provide per-ring kstats for TX bound and copied bytes,
+bind failures, copy fallbacks, packets queued for slots, completion slots,
+RX copied and loaned bytes, receive allocation failures, and posted-buffer
+shortfalls.  Driver-specific descriptor, device, and hardware error kstats
+remain in the driver.
+
+The initial implementation will include MAC kernel tests that use a synthetic
+ring provider to cover:
+
+* TX cookie iteration, copy fallback, context-descriptor slot accounting,
+  completion, and reclaim-on-retry.
+* RX initial posting, multi-buffer frames, copying, loaning, delayed buffer
+  return, discard, and allocation failure.
+* Start, stop, reset, and detach races with outstanding TX and RX resources.
+* A legacy provider which does not advertise the extension, demonstrating
+  that its existing callbacks and packet path are unchanged.
+
+The ice driver is the initial intended consumer.  Its existing independent
+descriptor-ring, offload, and completion logic makes it a useful validation
+target: this framework should absorb its TCB packet-DMA and RX control-buffer
+ownership while leaving ring programming and device-specific completion
+inspection in the driver.  New NIC drivers, including ports of existing
+drivers, may also opt in from their initial implementation.  Doing so provides
+additional implementation experience with the framework and should reduce the
+work otherwise required to build equivalent packet-DMA and buffer-lifetime
+machinery in every new driver.
+
+== Stability and implementation scope
+
+The packet-DMA provider interface is initially private to illumos and will be
+documented in a new MAC provider manual page.  Its opaque handles and
+versioned registration record permit implementation experience with ice and
+other drivers before any stability commitment is considered.
+
+The initial implementation scope is:
+
+* The opt-in per-ring registration extension and its validation.
+* TX packet preparation, cookie iteration, completion accounting, and both
+  interrupt notification and driver-query reclaim paths.
+* RX DMA buffer pooling, posting, copy-or-loan delivery, recycling, and
+  offload propagation.
+* Ring lifecycle integration, kstats, and kernel tests.
+* Conversion of one suitable multi-ring driver, initially ice.
+
+Adding support to other drivers is deliberately out of scope for the initial
+integration.  A driver can retain its existing implementation indefinitely,
+and a converted driver may elect to use the framework for only TX or RX.

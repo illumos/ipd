@@ -34,7 +34,7 @@ information is available at the end of this document.
 | published | [IPD 20 Kernel Test Facility](./ipd/0020/README.adoc)
 | published | [IPD 21 PCI Platform Unification](./ipd/0021/README.md)
 | draft     | [IPD 22 Unsharing shared Libraries](./ipd/0022/README.md)
-| predraft  | [IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform](./ipd/0023/README.md)
+| draft     | [IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform](./ipd/0023/README.md)
 | predraft  | [IPD 24 Support for 64-bit ARM](./ipd/0024/README.md)
 | draft     | [IPD 25 Authenticated pfexec](./ipd/0025/README.adoc)
 | draft     | [IPD 26 Sunset CardBus and PC Card](./ipd/0026/README.md)

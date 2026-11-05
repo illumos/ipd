@@ -325,14 +325,14 @@ raw sent in both directions, and converted with `zpool set projectmac`.
 
 == Project Plan
 
-The same change will be proposed to OpenZFS (pull request to follow),
-with the same rules, property names and values.  Only the platform
-default differs.
+The same change is proposed to OpenZFS
+(<<openzfs-19725,openzfs/zfs#19725>>), with the same rules, property names
+and values.  Only the platform default differs.
 
 . Integrate <<illumos-18635,18635>> (Gerrit 5190) and
   <<illumos-18582,18582>> (Gerrit 5136).
 . Agree on this IPD here, and on the matching OpenZFS pull request.
-. Integrate <<illumos-13795,13795>>, around the same time as the OpenZFS
+. Integrate <<illumos-13795,13795>> (Gerrit 5203), around the same time as the OpenZFS
   change, so that the two can't diverge.
 . Later, once releases with this change are widespread, consider changing the
   illumos default to `projectmac=on`.
@@ -369,3 +369,4 @@ default differs.
 * [[openzfs-63a26454ba]]https://github.com/openzfs/zfs/commit/63a26454ba[OpenZFS 63a26454ba - Introduce a flag to skip comparing the local mac when raw sending]
 * [[openzfs-da27b8bc7f]]https://github.com/openzfs/zfs/commit/da27b8bc7f[OpenZFS da27b8bc7f - Initialize "autoreplace" in spa_ld_get_props()]
 * [[openzfs-13709]]https://github.com/openzfs/zfs/issues/13709[openzfs/zfs#13709]
+* [[openzfs-19725]]https://github.com/openzfs/zfs/pull/19725[openzfs/zfs#19725 - Accept illumos ZFS's form of the encrypted objset local MAC]

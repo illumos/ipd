@@ -1,6 +1,7 @@
 ---
 authors: Joshua M. Clulow <josh@sysmgr.org>, Andy Fiddaman <illumos@fiddaman.net>
-state: draft
+state: published
+sponsor: Joshua M. Clulow <josh@sysmgr.org>
 ---
 
 # IPD 23 Xen and the Art of Operating System Maintenance: A Removal of a Platform

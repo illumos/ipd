@@ -1,0 +1,627 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: predraft
+:revremark: State: {state}
+:authors: Till Wegmüller <toasterson@gmail.com>
+:sponsor:
+
+= IPD 62 unet: A GLDv3 Virtual Network Device for Userland Frame I/O
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+illumos lacks a modern, first-class mechanism for userland programs to exchange
+Ethernet frames with the kernel networking stack. The legacy TUN/TAP driver
+bundled with some distributions is a STREAMS-based device dating to circa 2000,
+predating Crossbow, `dladm(8)`, zones, and the GLDv3 (MAC) framework. It
+integrates with none of them. Every piece of VPN software on illumos today
+depends on this driver: wireguard-go, boringtun, Tailscale, ZeroTier, OpenVPN.
+Some, like Tailscale, have given up on using it entirely and operate in a
+degraded userspace-networking mode with no kernel datapath.
+
+This IPD proposes *unet* (``userland net''), a new pseudo network device that
+is a first-class citizen of the GLDv3/MAC framework while simultaneously
+exposing a character device interface through which a userland process performs
+frame I/O. The name follows illumos convention: _simnet_ (simulated net),
+_uscsi_ (userland SCSI). The device integrates with `dladm(8)`, IP plumbing,
+zones, bridging, link aggregation, flow control, and the full Crossbow feature
+set.
+
+The data path is built around a *frame I/O* interface that allows batching
+multiple frames per system call, modelled on SmartOS's `frameio` framework.
+Simple `read(2)`/`write(2)` access is also supported for convenience and
+portability, but the batched interface is the primary high-performance path.
+
+Bill Welliver produced a working proof-of-concept of a GLDv3-based TAP
+replacement in 2020, tested on both SmartOS and OmniOS. That work demonstrated
+the viability of the approach and surfaced a number of design questions that
+this IPD seeks to resolve and carry forward.
+
+== Background
+
+=== The Legacy TUN/TAP Driver
+
+The Universal TUN/TAP driver was written by Maxim Krasnyansky around 2000 and
+ported to Solaris by Kazuyoshi Aizawa. It provides two devices: TUN (layer 3,
+IP frames) and TAP (layer 2, Ethernet frames), generated from a single source
+file via preprocessor defines. On illumos, the device is configured by pushing
+a series of STREAMS modules. Some applications require DLPI to configure
+features such as promiscuous mode.
+
+The driver has the following shortcomings:
+
+* *No GLDv3 integration.* The device does not register with the MAC
+  framework and cannot participate in any MAC-managed feature: hardware
+  classification, Rx rings, bandwidth limits via `flowadm(8)`, or MAC-level
+  statistics.
+* *No `dladm(8)` management.* Devices cannot be created, listed, or
+  destroyed through the standard administrative interface. There is no
+  persistent configuration.
+* *No zone support.* The device has no awareness of zones and cannot be
+  properly delegated to a non-global zone.
+* *No vanity naming.* Interfaces are named `tun0`, `tap0`, etc., providing
+  no indication of purpose.
+* *Clone device semantics.* The device is destroyed when the controlling file
+  descriptor is closed, which is useful for crash recovery but prevents the
+  interface from being pre-configured or managed independently of the VPN
+  process.
+* *No bridge or aggregation participation.* Because the device is not
+  MAC-registered, it cannot be added to a `dladm` bridge or link aggregation.
+* *One frame per system call.* Each `read(2)` or `write(2)` moves exactly
+  one frame. At high packet rates the system call overhead -- kernel entry,
+  context switch, per-call lock acquisition -- becomes the dominant cost.
+* *Poor performance.* As documented in illumos bug
+  https://www.illumos.org/issues/2623[#2623], CIFS/SMB transfers over
+  OpenVPN tunnels using TUN/TAP are orders of magnitude slower than comparable
+  operations over the same WAN using rsync or scp with OpenSSL.
+
+=== Prior Art in illumos
+
+illumos already contains several virtual network devices built on GLDv3:
+
+[cols="1,3,1,1"]
+|===
+|Device |Purpose |Char Dev |MAC Provider
+
+|*simnet*
+|Simulated Ethernet/WiFi for testing
+|No
+|Yes
+
+|*vnic*
+|Virtual NIC on top of physical/etherstub
+|No
+|Yes
+
+|*overlay*
+|VXLAN/Geneve encapsulation
+|Yes (`/dev/overlay`)
+|Yes
+
+|*iptun*
+|IP-in-IP tunneling (4in6, 6in4, 6to4)
+|No
+|Yes
+
+|*etherstub*
+|Layer 2 stub for vnic attachment
+|No
+|Yes
+|===
+
+Of these, *simnet* is architecturally closest to what unet needs to be: a
+purely software Ethernet device registered as a MAC provider, managed via DLD
+ioctls, with full `dladm` integration. The key difference is that simnet's
+data path connects two kernel-side instances peer-to-peer, while unet's data
+path bridges the kernel MAC layer to a userland file descriptor.
+
+The *overlay* driver demonstrates the other half of the design: a device that
+combines a character device (`/dev/overlay`) for userland daemon communication
+with full GLDv3 MAC registration. Its varpd daemon communicates through the
+character device to resolve overlay destinations, while the data plane operates
+entirely within the MAC framework.
+
+The *viona* driver (virtio network accelerator) is worth noting for its
+architectural choices. viona sits directly on the MAC client interface,
+bypassing the DLS/DLD stack for its data path. It uses kernel worker threads
+and VMM memory leases to move frames between guest virtio rings and the MAC
+layer without userland system calls in the hot path. While viona's tight
+coupling to the VMM subsystem makes it unsuitable as a direct model for
+general-purpose userland frame I/O, it demonstrates the performance benefits
+of a MAC-direct architecture and provides a reference for checksum offload
+handling and flow control integration.
+
+unet can be understood as a synthesis of these patterns: simnet's simple MAC
+provider structure, the overlay's dual character-device-plus-MAC personality,
+and a high-performance batched I/O interface inspired by SmartOS's vnd.
+
+=== Prior Art on SmartOS: vnd and frameio
+
+SmartOS developed the *vnd* (virtual network device) driver and an associated
+*frameio* (frame I/O) framework to provide high-performance layer 2 frame
+exchange between userland processes and the MAC layer. The primary consumer
+was QEMU, which used vnd to send and receive traffic through VNICs on behalf
+of KVM guests.
+
+The frameio interface addresses the fundamental bottleneck of one-system-call-
+per-frame interfaces: at high packet rates, kernel entry/exit overhead, context
+switches, and per-call lock acquisition dominate. frameio solves this with a
+batched ioctl that moves multiple frames per system call:
+
+[source,c]
+----
+typedef struct framevec {
+    void   *fv_buf;     /* userland buffer */
+    size_t  fv_buflen;  /* buffer capacity */
+    size_t  fv_actlen;  /* bytes actually consumed (output) */
+} framevec_t;
+
+typedef struct frameio {
+    uint_t     fio_version;
+    uint_t     fio_nvpf;    /* vectors per frame (scatter-gather) */
+    uint_t     fio_nvecs;   /* total vector count */
+    framevec_t fio_vecs[];  /* C99 flexible array */
+} frameio_t;
+----
+
+With `fio_nvpf = 1` (one contiguous buffer per frame) and up to 32 vectors,
+a single ioctl can transfer 32 frames. Scatter-gather support (`fio_nvpf > 1`)
+allows zero-copy-friendly layouts where headers and payloads reside in separate
+buffers. The kernel reports partial success by updating `fio_nvecs` and each
+`fv_actlen`, so the caller knows exactly which frames were processed.
+
+The frameio framework itself (`sys/frameio.h`, ~107 lines; `frameio.c`, ~465
+lines) is generic: it handles copyin/copyout, ILP32/LP64 data model conversion,
+and mblk chain assembly/disassembly. It is not coupled to vnd and is suitable
+for reuse. Neither vnd nor frameio were upstreamed to illumos-gate; this IPD
+proposes porting the frameio framework and building unet's primary data path
+around it.
+
+vnd also supported plain `read(2)`/`write(2)`, but deliberately limited them to
+a single frame with a single iovec -- the batched ioctl was the intended
+high-performance interface.
+
+=== Prior Art on Other Platforms
+
+On *Linux*, the `tun/tap` driver provides `/dev/net/tun` as a clone device;
+`ioctl()` configures the mode (TUN or TAP) and creates a named network
+interface. WireGuard was originally implemented as a kernel module that created
+its own `wg0`-style interfaces, bypassing tun/tap entirely.
+
+On *macOS*, Apple introduced undocumented `feth` (fake ethernet) devices in
+macOS 10.13. These are paired interfaces created via `ifconfig`: traffic
+injected on one member of a pair appears on the other. ZeroTier adopted this
+mechanism to eliminate their kernel extension dependency, using BPF for receive
+and `AF_NDRV` sockets for injection.
+
+On *FreeBSD* and *OpenBSD*, `tap(4)` provides a character device
+(`/dev/tapN`) paired with a standard `ifnet` network interface. FreeBSD also
+has an in-kernel WireGuard implementation (`if_wg`).
+
+== Proposal
+
+=== Overview
+
+unet is a pseudo device driver that registers each instance as a GLDv3 MAC
+provider (media type `DL_ETHER`) and simultaneously creates a character device
+node through which a userland process performs frame I/O. The driver is
+modelled on simnet and shares its administrative interface pattern: `dladm`
+subcommands backed by DLD ioctls backed by a `libdladm` helper library.
+
+The data path provides two interfaces:
+
+* A *frameio* batched ioctl interface (`UNET_IOC_FRAMEIO_READ`,
+  `UNET_IOC_FRAMEIO_WRITE`) that moves up to 32 frames per system call with
+  scatter-gather support. This is the primary interface for performance-
+  sensitive consumers such as VPN daemons.
+* A *read/write* interface (`read(2)`, `write(2)`) that moves one frame per
+  call. This provides compatibility with the programming model used by Linux
+  and BSD TAP devices and allows simple consumers -- scripts, prototyping,
+  low-throughput filters -- to operate without the frameio machinery.
+
+=== Operational Model
+
+. *Create:* `dladm create-unet [-t] [-m <mac-address>] <link-name>`
++
+DLS allocates a datalink ID and the driver creates the MAC instance and
+character device node. If `-t` is given, the device is temporary and will
+not survive reboot. If `-m` is omitted, a locally-administered unicast MAC
+address is randomly generated.
+
+. *Plumb:* `ipadm create-addr -T static -a 10.0.0.1/24 <link-name>/v4`
++
+Standard IP plumbing. The interface behaves like any other Ethernet link for
+the purpose of IP configuration, routing, and filtering.
+
+. *Attach:* The VPN process opens the character device and begins frame I/O.
+The link transitions to UP. Frames sent by the IP stack through the MAC
+layer (`mc_tx`) are queued for consumption by the process. Frames the process
+injects are delivered into the MAC layer via `mac_rx()`.
+
+. *Detach:* When the process closes the file descriptor, the link
+transitions to DOWN. Frames in either direction are dropped.
+
+. *Destroy:* `dladm delete-unet <link-name>`
+
+=== Architecture
+
+....
+ ┌─────────────────────────────────────┐
+ │       userland VPN process          │
+ │  open  frameio_read/write  poll     │
+ │        read  write  close           │
+ └───────────┬─────────────────────────┘
+             │ /dev/unet/<link>
+ ────────────┼──────────────────────────── kernel
+             │
+ ┌───────────┴─────────────────────────┐
+ │           unet driver               │
+ │                                     │
+ │  ┌───────────┐  ┌────────────┐      │
+ │  │ char dev  │  │ MAC provdr │      │
+ │  │ cb_ops    │  │ mc_tx ─────┼──┐   │
+ │  │           │  │            │  │   │
+ │  │ ioctl ────┼──┼─► frameio  │  │   │
+ │  │  read ────┼──┼─► mac_rx() │  │   │
+ │  │  write ───┼──┼─► mac_rx() │  │   │
+ │  │  poll     │  │            │  │   │
+ │  └───────────┘  └────────────┘  │   │
+ │                                 │   │
+ │  ┌─────────────────────────┐    │   │
+ │  │    per-device queue     │◄───┘   │
+ │  │  (ring buf / list_t)    │        │
+ │  │  frameio batch dequeue  │        │
+ │  │  single-frame dequeue   │        │
+ │  └─────────────────────────┘        │
+ │                                     │
+ │  DLD ioctl registration             │
+ │  (create, delete, info)             │
+ └───────────┬─────────────────────────┘
+             │ mac_register()
+ ┌───────────┴─────────────────────────┐
+ │         MAC framework               │
+ │  IP / bridging / zones / flows      │
+ └─────────────────────────────────────┘
+....
+
+=== Character Device and MAC: Separate Personalities
+
+The device nodes under `/dev/net/<linkname>` are managed by the MAC framework
+and are intended for observability (packet capture via `snoop(8)`, DLS access).
+They should not be written to by consumers.
+
+The unet character device nodes live under `/dev/unet/<linkname>` and are the
+exclusive interface for userland frame I/O. They do not use DLPI at all;
+they are plain character devices with their own `cb_ops` entry points and
+frameio ioctls.
+
+The two personalities are separated at the `dev_ops` level. The MAC device
+nodes use the MAC STREAMS infrastructure. The character device nodes use a
+distinct minor number range and their own `cb_ops` entry points. The driver's
+`getinfo`, `open`, and `close` routines inspect the minor number to determine
+which personality is being accessed. This keeps the two code paths cleanly
+separated and avoids the magic cookie approach used in Welliver's prototype
+(inspecting private data to distinguish character device streams from MAC
+streams).
+
+The `/dev/unet/<linkname>` entries are managed by an sdev plugin (described
+below under Zone Support) rather than static `devfsadm` symlinks.
+
+=== Data Path
+
+==== Frame I/O Interface (Primary)
+
+The primary data path uses batched ioctls modelled on SmartOS's frameio:
+
+`UNET_IOC_FRAMEIO_READ`::
+The caller provides a `frameio_t` with pre-allocated buffers. The kernel
+copies queued frames into the buffers, filling as many as the vector count
+allows in a single locked critical section. On return, `fio_nvecs` reflects
+how many vectors were consumed and each `fv_actlen` reports the actual frame
+size. If no frames are queued and the fd is blocking, the call sleeps; with
+`O_NONBLOCK` it returns `EAGAIN`.
+
+`UNET_IOC_FRAMEIO_WRITE`::
+The caller provides a `frameio_t` containing one or more frames. The kernel
+validates each frame (Ethernet header, MTU bounds), constructs an `mblk_t`
+chain, and injects the batch into the MAC layer via `mac_rx()`. On return,
+`fio_nvecs` and `fv_actlen` report what was consumed. Partial success is
+normal: if the receive path applies back-pressure, the remaining frames are
+reported as unconsumed.
+
+==== read/write Interface (Convenience)
+
+For simple consumers, the character device supports `read(2)` and `write(2)`:
+
+*Kernel to userland (mc_tx → read):*
+When the IP stack or a bridge transmits a frame on the unet interface, the MAC
+framework invokes `unet_m_tx()`. The driver pads short frames to `ETHERMIN`,
+performs any checksum or LSO emulation, strips hardware offload flags, and
+enqueues the resulting `mblk_t` on the per-device queue. A `pollwakeup()`
+signals the userland process that data is available. `read(2)` dequeues a
+single frame.
+
+*Userland to kernel (write):*
+When the process calls `write(2)`, the driver receives the data, validates the
+Ethernet header, applies address filtering (unicast match, multicast table,
+broadcast, promiscuous), optionally sets receive-side checksum flags, and calls
+`mac_rx()` to inject the frame into the MAC layer. From the perspective of
+every MAC client, this frame arrived ``from the wire''.
+
+==== I/O Mode Observability
+
+The driver tracks which interface the attached process is using. When a
+process performs its first I/O operation on the character device, the driver
+records whether it used frameio ioctls or `read(2)`/`write(2)`. This mode is
+exposed as a read-only link property (`io-mode`: `frameio` or `read-write`)
+visible via `dladm show-linkprop` and as a kstat field. A one-time
+`cmn_err(CE_NOTE)` is logged when a consumer attaches using the `read-write`
+path, alerting operators that the device is operating in single-frame mode and
+may exhibit reduced throughput under load. This helps operators diagnose
+performance issues and identify software that should be updated to use the
+frameio interface.
+
+==== Data Queues
+
+Each unet instance maintains two kernel-side data queues, modelled on vnd's
+`vnd_data_queue_t`:
+
+* A *read queue* for frames arriving from the MAC layer (`mc_tx`) awaiting
+  consumption by the userland process.
+* A *write queue* for frames submitted by userland awaiting injection into
+  the MAC layer via `mac_rx()`.
+
+Each queue is an `mblk_t` chain (head and tail pointers) protected by a mutex,
+with a current byte count and a configurable maximum size (high-water mark).
+The queue sizes are tunable via ioctls (`UNET_IOC_SETRXBUF`,
+`UNET_IOC_SETTXBUF`) and exposed as link properties, allowing operators to
+tune buffering for their workload.
+
+Both the frameio ioctls and `read(2)`/`write(2)` operate on the same queues.
+The frameio read ioctl drains multiple frames from the read queue in one locked
+section; `read(2)` drains one. This keeps the hot path out of the STREAMS
+scheduler entirely. The prototype exposed a significant performance issue:
+enabling STREAMS `canputnext()` flow control on the character device caused
+throughput to drop by several orders of magnitude, even with tuned water marks.
+Using dedicated kernel queues avoids this.
+
+==== Flow Control
+
+If the read queue fills (a slow or stalled consumer), the driver returns
+unprocessed `mblk_t` chains to MAC from `mc_tx`, triggering standard MAC-level
+back-pressure. When space becomes available, the driver calls
+`mac_tx_update()` to resume transmission.
+
+On the write side, if the write queue has insufficient space for the submitted
+frames, blocking callers sleep on a condition variable until space is
+available; non-blocking callers receive `EAGAIN`. Once a write has been
+acknowledged, the frame will not be dropped (excepting packet filter hooks),
+matching the guarantee provided by vnd.
+
+A `pollwakeup()` fires `POLLIN`/`POLLRDNORM` when data arrives on the read
+queue and `POLLOUT`/`POLLWRNORM` when space opens on the write queue, allowing
+integration with `poll(2)`, `port_associate(3C)`, and event-driven I/O loops.
+
+=== Link State
+
+A unet interface is considered *UP* when a process has the character device
+open and *DOWN* when no process holds it. This is signalled to the MAC
+framework via `mac_link_update()`. When the link is down, `mc_tx` drops all
+frames silently: there is no point in queueing frames that nobody will read.
+
+This semantic maps naturally to VPN use: the tunnel is ``up'' precisely when the
+VPN daemon is running and has attached to the device.
+
+=== Zone Support and the sdev Plugin
+
+unet devices record the zone ID at creation time. A device created in a
+non-global zone is not visible from the global zone, following the same model
+as simnet.
+
+The character device nodes under `/dev/unet/` must be dynamically populated
+per-zone. The existing `/dev/net/` directory is implemented as a built-in sdev
+directory (`sdev_netops.c`) whose `lookup` and `readdir` vnodeops query the
+DLS vanity naming table to create and validate entries on demand. This works
+well for `/dev/net/` but is compiled into the sdev filesystem itself and
+cannot be extended by third-party drivers.
+
+For `/dev/unet/`, we use the *sdev plugin* interface
+(`sys/fs/sdev_plugin.h`), which allows a kernel module to register a dynamic
+directory under `/dev` without modifying the sdev source. The interface
+requires three callbacks:
+
+`spo_validate`::
+Given a node, determine whether it is still valid. unet checks whether the
+named device still exists and belongs to the caller's zone. Returns
+`SDEV_VTOR_VALID`, `SDEV_VTOR_INVALID`, or `SDEV_VTOR_STALE`. Invalid or
+stale nodes are pruned from the directory cache on the next `readdir` or
+`lookup`.
+
+`spo_filldir`::
+Populate the directory contents. unet walks its list of active devices for
+the current zone and calls `sdev_plugin_mknod()` for each one, creating
+character device nodes with the appropriate minor numbers and permissions.
+In the global zone, it also calls `sdev_plugin_mkdir()` to create a
+`zone/<zonename>` subdirectory for each non-global zone that has unet
+devices, providing administrative visibility.
+
+`spo_inactive`::
+Called when a node becomes a zombie. unet uses this to release any
+per-node references (e.g. DLS handles held during lookup).
+
+The driver registers the plugin during `attach(9E)` via
+`sdev_plugin_register("unet", &unet_sdev_ops)` and unregisters during
+`detach(9E)` via `sdev_plugin_unregister()`. The `SDEV_PLUGIN_SUBDIR` flag
+is set to indicate that the plugin manages subdirectories (the
+`zone/<zonename>` hierarchy).
+
+The resulting namespace:
+
+----
+/dev/unet/<linkname>                    -- per-zone view
+/dev/unet/zone/<zonename>/<linkname>    -- global zone cross-zone access
+----
+
+Nodes appear and disappear dynamically as unet instances are created and
+destroyed. No `devfsadm` plugin is needed for `/dev/unet/` itself -- the sdev
+plugin handles the entire lifecycle. (A `devfsadm` plugin may still be useful
+for creating the initial `/dev/unet` directory entry during package
+installation.)
+
+=== Management Interface
+
+The following `dladm(8)` subcommands are added:
+
+----
+dladm create-unet  [-t] [-R <root-dir>] [-m <mac-address>] <link>
+dladm delete-unet  [-R <root-dir>] <link>
+dladm show-unet    [-p] [-o <field>,...] [-P] [<link>]
+dladm up-unet      [<link>]
+----
+
+These mirror the existing `simnet` subcommands. The `-t` flag creates a
+temporary (non-persistent) device. `show-unet` displays link name and MAC
+address; `-P` shows persistent configuration regardless of active state.
+
+A new datalink class `DATALINK_CLASS_UNET` is added to `dls_mgmt.h`. unet
+links participate in bridging and link aggregation alongside physical devices,
+simnets, and etherstubs.
+
+A new `libdladm` helper, `libdlunet`, provides the userland API:
+`dladm_unet_create()`, `dladm_unet_delete()`, `dladm_unet_info()`,
+`dladm_unet_up()`. This addresses a broader desire for programmatic interface
+management: currently, applications that need to create and destroy network
+interfaces must shell out to `dladm(8)`. Exposing a stable C API through
+`libdladm` for at least the unet operations would allow VPN daemons and
+similar software to manage their interfaces directly.
+
+=== Capabilities and Properties
+
+Like simnet, unet advertises configurable hardware offload capabilities to
+allow testing and to reduce unnecessary work in the data path:
+
+[cols="2,2,1,3"]
+|===
+|Private Property |Values |Default |Description
+
+|`_rx_ipv4_cksum`
+|on/off
+|off
+|Rx IPv4 header checksum flag
+
+|`_tx_ipv4_cksum`
+|on/off
+|off
+|Tx IPv4 header checksum
+
+|`_tx_ulp_cksum`
+|none/fullv4/partial
+|none
+|Tx TCP/UDP checksum
+
+|`_lso`
+|on/off
+|off
+|Large Segment Offload
+|===
+
+MTU is configurable up to 9000 bytes (jumbo frames), which is relevant for
+NFS-over-VPN workloads where large frames reduce per-packet overhead
+significantly.
+
+=== Statistics
+
+Each unet instance exports per-device kstats (kstat class `"net"`) providing:
+
+* Standard MAC statistics: bytes/packets in/out, multicasts, broadcasts.
+* unet-specific counters: read queue drops (queue full), write queue drops,
+  frameio reads/writes, single-frame reads/writes, current read/write queue
+  depth, high-water mark hits, flow control events (MAC back-pressure
+  applied/released).
+* The I/O mode of the currently attached consumer (`frameio` or `read-write`,
+  or `none` if no process is attached).
+
+These are inspectable via `kstat(8)` and `dlstat(8)` and provide the
+observability needed to diagnose throughput issues in VPN deployments.
+
+== What This Proposal Does Not Cover
+
+=== TUN Mode
+
+The legacy TUN driver operates at layer 3, exchanging raw IP packets rather
+than Ethernet frames. unet is strictly a layer 2 (Ethernet) device. A layer 3
+mode could be added in the future -- the MAC framework supports non-Ethernet
+media types -- but the overwhelming majority of modern VPN software operates at
+layer 2 (TAP mode) or implements its own IP encapsulation over a UDP socket
+and merely needs a point of injection into the kernel network stack.
+
+=== In-Kernel VPN
+
+This proposal does not implement a kernel-resident VPN protocol such as
+WireGuard. unet provides the plumbing that such an effort could build on: a
+well-integrated virtual Ethernet interface is the foundation whether the
+cryptographic engine runs in userland or in the kernel.
+
+=== API Compatibility with Legacy TUN/TAP
+
+unet is not a drop-in replacement for the legacy driver. The legacy driver
+requires pushing STREAMS modules and uses DLPI for configuration; unet uses
+`dladm` for configuration and `read(2)`/`write(2)` or frameio ioctls for
+frame I/O. VPN software will require adaptation, but the unet interface is
+substantially simpler than the legacy one. The `read(2)`/`write(2)` model
+(one frame per call) is consistent with Linux and BSD TAP semantics and should
+be straightforward to support in most VPN implementations. Software that needs
+higher throughput can adopt the frameio interface.
+
+== Prior Work and Acknowledgments
+
+Bill Welliver (hww3) designed and implemented the original GLDv3 TAP
+replacement prototype and wrote the
+https://bill.welliver.org/space/smartos/gld3tap.html[GLDv3 TAP Driver replacement proposal].
+The prototype was tested on SmartOS and OmniOS and demonstrated ZeroTier
+integration. This IPD builds directly on that work, incorporating its design
+decisions where they proved sound and proposing alternatives where the
+prototype identified open problems. Robert Mustacchi provided significant
+architectural guidance on the original prototype, including the suggestion of
+a vector-based I/O interface.
+
+The SmartOS vnd driver and frameio framework, developed at Joyent by Robert
+Mustacchi, demonstrated the batched frame I/O model that this IPD adopts.
+vnd was used to provide high-performance layer 2 frame exchange between
+userland QEMU processes and VNICs. The frameio framework is generic and
+suitable for porting to illumos-gate.
+
+The simnet driver, originally developed at Sun Microsystems and enhanced at
+Joyent, provides the structural template. Ryan Zezeski's work
+https://zinascii.com/2019/resurrecting-simnet.html[resurrecting simnet] and
+adding checksum offload emulation is directly relevant.
+
+== References
+
+* https://www.whiteboard.ne.jp/~admin2/tuntap/[Legacy TUN/TAP for Solaris]
+  -- Kazuyoshi Aizawa's STREAMS-based driver
+* https://www.illumos.org/issues/2623[illumos bug #2623] -- Package and
+  provide OpenVPN and TUN/TAP drivers manageable by dladm
+* https://bill.welliver.org/space/smartos/gld3tap.html[Welliver's GLDv3 TAP proposal]
+  -- Original GLDv3 TAP replacement design
+* https://github.com/TritonDataCenter/illumos-joyent/tree/master/usr/src/uts/common/io/vnd[SmartOS vnd driver]
+  -- Virtual network device with frameio batched I/O
+* https://illumos.org/man/9E/mac[mac(9E)] -- MAC framework driver entry
+  points
+* https://illumos.org/man/9E/GLDv3[GLDv3(9E)] -- Generic LAN Driver
+  framework v3
+* https://www.zerotier.com/news/how-zerotier-eliminated-kernel-extensions-on-macos/[How ZeroTier Eliminated Kernel Extensions on macOS]
+  -- macOS feth mechanism
+* https://blog.shalman.org/tailscale-for-sunos-in-2025/[Tailscale for SunOS in 2025]
+  -- Nahum Shalman on the state of Tailscale on illumos
+* https://zinascii.com/2019/resurrecting-simnet.html[Resurrecting simnet]
+  -- Ryan Zezeski on simnet enhancements
+* link:../0018/README.adoc[IPD 18] -- Overlay Network Integration/Upstream
+* link:../0028/README.md[IPD 28] -- EOF Legacy Network Driver Interfaces

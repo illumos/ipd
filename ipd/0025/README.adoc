@@ -189,6 +189,29 @@ final target, subject to the usual pfexec scrubbing rules.
    exec attributes to assign, and the kernel will record the authentication
    by setting the `PRIV_PFEXEC_AUTH` flag in the new process credentials.
 
+=== Lifetime of the PRIV_PFEXEC_AUTH flag
+
+The `PRIV_PFEXEC_AUTH` flag will record that the process's real user has
+authenticated for `pfexec`, and it is scoped to that user. It will be set by
+the kernel, on the credentials of the new process image, when `pfexecd` reports
+a successful authentication. The only other way to set it will be directly
+through setpflags(2) or proc(5), which will be limited as described in the
+setpflags(2) section below. Like `PRIV_PFEXEC`, it will be inherited across
+fork(2) and exec(2), so it stays for the lifetime of the authenticated process
+tree. It will be cleared:
+
+- whenever the real user ID of the process changes, whether this is
+  via setuid(2) or proc(5)'s `PCSCRED`, etc. These are the same places
+  that `PRIV_PFEXEC` is already cleared. This also means that the flag
+  can't follow a user through su(8).
+- explicitly, with setpflags(2), `ppriv -f -A` or the proc(5) `PCSPRIV`
+  control. Clearing the flag will not require any privilege.
+
+The flag is held only in the process credentials, so a new login, or a `pfexec`
+from a shell which was not authenticated, starts without it. Caching across
+separate invocations is handled by pam_timestamp(7), described under Caching
+below.
+
 == PAM Authentication
 
 The `pfauth` command will authenticate the invoking user via PAM using
@@ -257,7 +280,22 @@ https://illumos.org/man/5/policy.conf[policy.conf(5)] and via the
 
 If neither of these flags is specified then both lists are searched; this is
 also the behaviour when both flags are present. In this way, backwards
-compatibility with the existing behaviour is preserved.
+compatibility with the existing behaviour is preserved. An entry from an
+authenticated profile is a right which the user does hold, and the
+authentication step is enforced in the exec(2) path by `pfexecd`, not by the
+caller of `getexecuser()`. The profile shells depend on this - pfksh(1) and the
+other profile shells call `getexecuser()` for each command to decide whether it
+should be run through pfexec(1), so a default which hid the authenticated set
+would make them run such commands unprivileged, with no prompt. No consumer of
+`getexecuser()` can grant privileges itself, so a caller which is unaware of
+the new set cannot bypass authentication by seeing both.
+
+The consumers in the gate which need to tell the two sets apart, `pfexecd`
+and profiles(1), will search them separately using the new flags. No field
+will be added to `execattr_t` to record the set an entry came from. The
+structure is allocated by the library and only read by callers, so a field
+could be added if a need arises but, since a profile can appear in both lists,
+anyone that needs an unambiguous answer needs to search both independently.
 
 NOTE: There is also a private `_enum_profs()` function used by a small number
 of components, which will be extended in the same way.
@@ -546,15 +584,23 @@ flag.
 
 === setpflags(2)
 
-The `setpflags` system call will be updated to handle changing the new
-`PRIV_PFEXEC_AUTH` flag. Setting this flag will require the `PRIV_PROC_SETID`
-privilege.
+The `setpflags` system call will be updated to handle the new
+`PRIV_PFEXEC_AUTH` flag. Clearing it will need no privilege. Setting it will be
+subject to the same policy as changing the real user ID to 0 with setuid(2). A
+process which meets this could already become root and run any command, or
+assume any profile, so being able to set the flag doesn't give it access it
+does not already have. A process which has `PRIV_PROC_SETID` from a profile but
+is not root will not be able to set it.
+
+Allowing the flag to be set this way keeps `ppriv -f +A` available for
+testing and for administrators, and keeps its handling in line with the
+other user-settable process flags.
 
 === proc(5) control PCSPRIV
 
 As per `setpflags(2)`, setting the `PRIV_PFEXEC_AUTH` flag via the
-https://illumos.org/man/5/proc[proc(5)] interface will also require the
-`PRIV_PROC_SETID` privilege.
+https://illumos.org/man/5/proc[proc(5)] interface will be subject to the same
+policy.
 
 == Auditing
 

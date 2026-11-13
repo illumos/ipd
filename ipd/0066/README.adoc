@@ -1,0 +1,372 @@
+:showtitle:
+:toc: left
+:numbered:
+:icons: font
+:state: draft
+:revremark: State: {state}
+:authors: Matthew Ahrens <matt@mahrens.org>
+:sponsor: Robert Mustacchi <rm@fingolfin.org>
+
+= IPD 66 Encrypted ZFS Compatibility with OpenZFS
+{authors}
+
+[cols="3"]
+|===
+|Authors: {authors}
+|Sponsor: {sponsor}
+|State: {state}
+|===
+
+illumos ZFS and OpenZFS compute one of the MACs of an encrypted dataset
+differently, so each fails to mount many of the encrypted datasets that the
+other wrote.  The pool imports and the key loads, but `zfs mount` fails with
+EIO.  The difference is whether a dataset's project accounting is
+authenticated.  Nothing else in the encryption format differs.  This is
+illumos issue <<illumos-13795,13795>>.
+
+This IPD proposes that illumos and OpenZFS make the same change: read both
+forms of the MAC, and add a pool property, `projectmac`, that chooses the form
+that is written.  Pools can then move between illumos and OpenZFS in either
+direction, and every dataset a pool has when it moves stays mountable by all
+releases of the platform that created it.  No pool feature is needed.
+
+The change is the same on both platforms, with the same rules, property
+names and values; only the default form differs.  This IPD describes both,
+and is also the design document for the matching OpenZFS change.
+
+This changes the on-disk format that illumos may write and adds new pool and
+dataset properties, and it needs to be agreed on with OpenZFS, so it is
+described here rather than only in a bug.  <<ipd-50,IPD 50>>, on how illumos
+consumes OpenZFS changes, has a placeholder for this encryption problem.
+
+== Background
+
+=== The two MACs of an encrypted objset
+
+An encrypted `objset_phys_t` carries two 256-bit MACs:
+
+* The *portable MAC* covers the meta-dnode and the portable flags.  It
+  travels in raw send streams.
+* The *local MAC* covers the space accounting dnodes (user, group and project
+  used) and the flags that aren't portable.  The accounting dnodes are stored
+  unencrypted, and are left out of the portable MAC because a receive
+  recomputes them.  The local MAC never leaves the pool.
+
+Two different local MACs are written today:
+
+[cols="1,3,2,2",options="header"]
+|===
+|Form |Covers |Zeroed when |Written by
+
+|With project
+|non-portable flags, user, group and project used dnodes
+|no accounting dnodes, or user accounting incomplete
+|OpenZFS 0.8.0 (2019) and later
+
+|Without project
+|non-portable flags, user and group used dnodes
+|no accounting dnodes
+|illumos since <<illumos-11479,11479>> (2019)
+|===
+
+The two forms are the same when there is no project used dnode, which is why
+pools without `feature@project_quota` have always been compatible.  Everything
+else matches: key wrapping, key derivation, per-block encryption, the dnode,
+block pointer and indirect block MACs, and ZIL encryption.
+
+`feature@project_quota` is enabled by default in new pools on both platforms,
+so most encrypted datasets created since 2019 are affected.
+
+=== Consequences
+
+* illumos can't mount encrypted datasets that OpenZFS wrote on pools with
+  `project_quota` active, and OpenZFS can't mount those that illumos wrote.
+  For example, an OpenZFS rescue image can't recover an encrypted illumos
+  pool.
+* The failed mount also logs a permanent error `<0x0>` against the dataset in
+  `zpool status -v`, which looks worse than it is: nothing is written or
+  damaged, and other datasets in the pool are unaffected.
+* illumos can't mount a dataset that OpenZFS raw-received onto an existing
+  dataset until OpenZFS has mounted it once, because its local MAC is zeroed.
+* On illumos, a raw receive onto a dataset with user accounting fails an
+  `ASSERT0(os->os_flags & OBJSET_FLAG_USERACCOUNTING_COMPLETE)` in
+  `dsl_crypto_recv_raw_objset_check()` on DEBUG kernels.
+* The without-project form authenticates less.  Someone who can write the
+  disks but doesn't have the key can change a dataset's project usage without
+  being detected.  ZFS may then refuse writes with EDQUOT, or let a project
+  exceed its quota.
+
+Raw send streams are not affected: they don't carry the local MAC.
+
+== Goals
+
+* illumos and OpenZFS each mount encrypted datasets written by the other.
+* A pool that moves to the other platform and is written there can still go
+  back to older releases of the platform it came from.  This holds for pools
+  created with this change, and for older pools after one `zpool set`.
+* Both platforms follow the same rules, so they accept exactly the same
+  datasets and write the same forms.
+* A path for illumos to move to the with-project form, which also protects
+  project accounting.
+
+== Proposal
+
+=== Reading
+
+Verifying an objset's MACs, with its key loaded, accepts either form of the
+local MAC:
+
+. The portable MAC must match, as today.
+. Accept if the stored local MAC matches the with-project form.
+. Accept if the computed with-project form is zeroed, whatever is stored.
+  OpenZFS does this today, for datasets with no accounting or with
+  incomplete accounting that will be recomputed on mount.  illumos gets it
+  with <<illumos-18582,18582>>.
+. Accept if the stored local MAC matches the without-project form.
+. Otherwise fail with ECKSUM, as today.
+
+Accepting both forms doesn't meaningfully weaken datasets that have the
+with-project form: neither form can be produced without the key.  The only
+extra freedom is leaving project accounting out of a MAC that the key holder
+computed.
+
+=== Writing
+
+The form is a property of each dataset on each pool, and is never sent in a
+stream.  Each non-raw write of an objset uses:
+
+. the pool's `projectmac` property, if it is `on` or `off`;
+. otherwise the form the dataset already has;
+. otherwise the platform default: `off` on illumos, `on` on OpenZFS.
+
+A dataset has no form when its local MAC is zeroed (a new dataset, or after a
+raw receive), when it has no project used dnode (both forms match), or when
+its MAC was written while user accounting was incomplete, as OpenZFS 2.1.5
+did (<<openzfs-13709,openzfs/zfs#13709>>).
+
+The without-project form is never zeroed while accounting dnodes exist, even
+while accounting is incomplete, so that an illumos release without this
+change can still verify the dataset.  Raw writes are unchanged.
+
+=== The `projectmac` pool property
+
+`projectmac=on|off|mixed` chooses the form for the whole pool:
+
+`on`::
+Every encrypted filesystem is written in the with-project form.
+`off`::
+Every encrypted filesystem is written in the without-project form.
+`mixed`::
+No pool-wide form has been chosen.  Each filesystem keeps the form it has,
+and one with no form takes the platform default: `off` on illumos, `on` on
+OpenZFS.
+
+* `zpool create` sets it to the platform default (`off` on illumos, `on` on
+  OpenZFS), unless another value is given with `-o projectmac=`.  So a new
+  pool keeps the form of the platform that created it, wherever it moves.
+  `zpool create -o projectmac=on` on illumos makes a pool to be used with
+  older OpenZFS, and `-o projectmac=off` on OpenZFS makes one to be used with
+  older illumos.
+* Pools created before this change, on either platform, show `mixed` with
+  source `default`.  A `mixed` pool that moves to the other platform gets the
+  other platform's default for its new datasets, which older releases of its
+  home platform can't mount.  Setting `projectmac` to the home platform's
+  form before those datasets are written prevents that.
+* Setting `on` or `off` converts every filesystem whose key is loaded and whose
+  local MAC is in the other form: `zpool set` dirties each one and waits for
+  the next txg sync, which writes it in the new form.  Other filesystems are
+  converted by their first write after their key is loaded.  Snapshots are
+  never rewritten.
+* Older releases ignore pool properties they don't know, so they import the
+  pool and keep writing their own form.
+
+For example, to move a pool from illumos to OpenZFS and back to an older
+illumos, nothing needs to be done if the pool was created with this change.
+For a pool created earlier:
+
+----
+# zpool get projectmac tank
+NAME  PROPERTY    VALUE   SOURCE
+tank  projectmac  mixed   default
+# zpool set projectmac=off tank
+----
+
+=== The `projectmac` dataset property
+
+A read-only property of encrypted filesystems and snapshots shows `on` or
+`off`.  It is computed from the stored local MAC, so it can't go stale, and
+from the same function the kernel uses to choose the form for the next write,
+so what is shown agrees with what is written.  For a filesystem with no form,
+it shows the form that its next write will use.
+
+It needs the key: it shows `-` when the key isn't loaded, and for volumes and
+unencrypted datasets.  It is also available to channel programs.
+
+=== Moving illumos to the with-project form
+
+The with-project form is the better long-term default, because it also
+protects project accounting.  Users can opt in pool by pool with
+`zpool set projectmac=on`.  Once releases with this change are widespread,
+illumos can change its default to `on`.  Pools created before then keep their
+form; only new pools and `mixed` pools follow the new default.
+
+=== Related changes
+
+This change depends on two others, which are separate illumos issues:
+
+* <<illumos-18582,18582>> ports OpenZFS's raw receive fixes, including
+  <<openzfs-63a26454ba,63a26454ba>>, which zeroes the local MAC while user
+  accounting is incomplete.  Without it, illumos can't read a dataset that
+  OpenZFS raw-received, and panics DEBUG kernels on such receives itself.
+* <<illumos-18635,18635>> fixes `spa_ld_get_props()`, which uses an
+  uninitialized `autoreplace` when a pool has pool properties but no
+  `autoreplace` property.  Every new pool now has a pool property, so without
+  this fix, importing one could turn on `autoreplace`.  This is a port of
+  OpenZFS <<openzfs-da27b8bc7f,da27b8bc7f>>.
+
+OpenZFS's `zdb -d` also reports each encrypted dataset's form.  illumos's zdb
+can't load keys (it has no `-K`), so that will wait until `-K` is ported.
+
+== Compatibility
+
+=== Why no pool feature
+
+A pool feature protects older software from a format it would mishandle.
+Here, both forms already exist without one, and older software fails safely.
+
+* *Both forms are already in wide use.*  A feature added now can't describe
+  the pools written since 2019, so the code must detect the form by trying
+  both MACs anyway.  It can do that cheaply and reliably.
+* *The failure is contained.*  Older software that meets the other form fails
+  that one dataset's mount with EIO.  It doesn't write, damage or panic.
+* *A feature would make things worse.*  If writing the with-project form
+  activated a feature that older illumos doesn't know, older illumos couldn't
+  import the pool at all, where today it imports it and mounts everything but
+  those datasets.  A read-only compatible feature would still prevent a
+  writable import.  On OpenZFS, the same feature would stop older OpenZFS
+  from importing its own pools writable, though it reads them fine today.
+
+=== Interoperability
+
+Mounting an encrypted dataset on a pool with `project_quota` active:
+
+[cols="3,1,1,1,1",options="header"]
+|===
+|Dataset's local MAC |illumos today |illumos with this |OpenZFS today |OpenZFS with this
+
+|With-project form |EIO |Mounts |Mounts |Mounts
+|Without-project form |Mounts |Mounts |EIO |Mounts
+|Zeroed by an OpenZFS raw receive onto an existing dataset |EIO |Mounts |Mounts |Mounts
+|===
+
+Releases with this change keep each dataset's form through writes, export
+and import, unless the pool's `projectmac` property chooses another.
+
+== Alternatives Considered
+
+Recording the form in `os_flags` bits::
+This was proposed earlier in <<illumos-13795,13795>>.  Without a feature,
+older releases keep bits they don't know while rewriting the objset, so the
+bits can be wrong; for example, older illumos writes its own form over a
+zeroed MAC and keeps a bit that says otherwise.
+A settable dataset property::
+A setting that can differ from the stored form is confusing, and users move
+whole pools, so a per-dataset choice isn't needed.
+Choosing the form automatically::
+Setting the pool property from the first dataset seen in a form, or guessing
+it from the pool's history, needed state that was lost on export, or could
+guess wrong and convert datasets.  Setting it at `zpool create` is simpler
+and visible.
+Converting to the with-project form on every write::
+An older illumos boot environment, if rolled back to, would lose the datasets
+that the newer one had written.
+A pool feature::
+See <<_why_no_pool_feature>>.
+Changing only OpenZFS::
+illumos still couldn't mount OpenZFS's datasets.
+Other names::
+`localmac` with `project`, `noproject` and `unknown` was considered.  "Local
+MAC" is an internal term, and `unknown` suggests that the system would go and
+find out.  `projectmac` says what is chosen: whether a dataset's MAC covers its
+project accounting.  `on|off` plus a third value is the usual shape
+(`xattr=on|off|sa`), and `mixed` follows `casesensitivity=mixed`.  The manual
+pages say first that the property changes what is authenticated, not what is
+counted, so that `off` isn't read as turning project accounting off.
+
+== Testing
+
+Each project tests reading the other's form from a pool image that the other
+wrote, and tests both of its own forms through the `projectmac` pool
+property.  New illumos ZFS tests:
+
+* `zpool_import/zpool_import_local_mac_project` imports a pool image written
+  by OpenZFS on Linux (88 KB, with a project quota and a snapshot) and checks
+  that its dataset mounts and keeps its form, that new datasets take `off`,
+  and that `zpool set projectmac=on` converts them.
+* `userquota/userspace_encrypted_local_mac_project`,
+  `userspace_encrypted_projectmac_create`, `_mixed`, `_busy` and `_rollback`,
+  and `userspace_send_encrypted_local_mac_project` and
+  `userspace_send_encrypted_projectmac_resume` cover the pool property's
+  values, conversion with and without the key loaded, snapshots, clones,
+  rollback, raw sends in both directions between the forms, and an
+  interrupted raw receive.  They match the tests added to OpenZFS.
+* `userquota/userspace_encrypted_13709` imports OpenZFS's pool image for
+  <<openzfs-13709,openzfs/zfs#13709>>.
+* `userquota/userspace_encrypted_incomplete_mac`,
+  `userspace_send_encrypted` and `userspace_send_encrypted_changes` (with
+  <<illumos-18582,18582>>) cover raw receives onto datasets with accounting.
+
+The full ZFS test suite, on a DEBUG kernel, shows no new failures.
+
+Pool images were also moved by hand between illumos and Linux VMs, with each
+side with and without the change, covering each cell of the table in
+<<_interoperability>>: datasets created on each side, written on the other,
+raw sent in both directions, and converted with `zpool set projectmac`.
+
+== Project Plan
+
+The same change is proposed to OpenZFS
+(<<openzfs-19725,openzfs/zfs#19725>>), with the same rules, property names
+and values.  Only the platform default differs.
+
+. Integrate <<illumos-18635,18635>> (Gerrit 5190) and
+  <<illumos-18582,18582>> (Gerrit 5136).
+. Agree on this IPD here, and on the matching OpenZFS pull request.
+. Integrate <<illumos-13795,13795>> (Gerrit 5203), around the same time as the OpenZFS
+  change, so that the two can't diverge.
+. Later, once releases with this change are widespread, consider changing the
+  illumos default to `projectmac=on`.
+
+== Open Questions
+
+* When should illumos change its default to `on`?  This IPD suggests waiting
+  until the distributions' supported releases all have this change.
+* Should `zdb -K` be ported, so that illumos's zdb can report each dataset's
+  form?
+
+== How the Forms Diverged
+
+* OpenZFS added the project used dnode to the local MAC in
+  <<openzfs-7b30ee6baf,7b30ee6baf>> (2018, before 0.8.0), and described it as
+  an on-disk format change.
+* illumos ported project quotas in <<illumos-11479,11479>> (2019) without that
+  change.  Its `zio_crypt_do_objset_hmacs()` checks the project used dnode
+  when deciding whether to zero the MAC, but never hashes it, so this was an
+  omission rather than a design choice.
+* OpenZFS later zeroed the local MAC while user accounting is incomplete
+  (<<openzfs-63a26454ba,63a26454ba>>, 2022, in 2.1.x and 2.2.0 and later), so
+  that a raw receive can land on a dataset that already has user accounting,
+  such as a send back to its origin.  illumos lacks this.
+
+== References
+
+* [[ipd-50]]link:../0050/README.adoc[IPD 50 ZFS Maintenance and Consumption of OpenZFS Technology]
+* [[illumos-11479]]https://www.illumos.org/issues/11479[illumos 11479 - zfs project support]
+* [[illumos-13795]]https://www.illumos.org/issues/13795[illumos 13795 - Encrypted zfs is not compatible with openzfs]
+* [[illumos-18582]]https://www.illumos.org/issues/18582[illumos 18582 - raw receive of an encrypted dataset fails when the target has user accounting]
+* [[illumos-18635]]https://www.illumos.org/issues/18635[illumos 18635 - spa_ld_get_props() uses an uninitialized autoreplace]
+* [[openzfs-7b30ee6baf]]https://github.com/openzfs/zfs/commit/7b30ee6baf[OpenZFS 7b30ee6baf - Project dnode should be protected by local MAC]
+* [[openzfs-63a26454ba]]https://github.com/openzfs/zfs/commit/63a26454ba[OpenZFS 63a26454ba - Introduce a flag to skip comparing the local mac when raw sending]
+* [[openzfs-da27b8bc7f]]https://github.com/openzfs/zfs/commit/da27b8bc7f[OpenZFS da27b8bc7f - Initialize "autoreplace" in spa_ld_get_props()]
+* [[openzfs-13709]]https://github.com/openzfs/zfs/issues/13709[openzfs/zfs#13709]
+* [[openzfs-19725]]https://github.com/openzfs/zfs/pull/19725[openzfs/zfs#19725 - Accept illumos ZFS's form of the encrypted objset local MAC]
